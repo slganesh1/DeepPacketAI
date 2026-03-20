@@ -1,0 +1,30 @@
+[Unit]
+Description=DeepPacketAI Telecom Analyzer
+After=network.target
+
+[Service]
+Type=simple
+User=deeppacketai
+Group=deeppacketai
+WorkingDirectory=/opt/deeppacketai
+
+# Environment variables — set your API key here
+EnvironmentFile=/opt/deeppacketai/.env
+
+ExecStart=/opt/deeppacketai/deeppacketai -server
+Restart=on-failure
+RestartSec=5s
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/deeppacketai
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=deeppacketai
+
+[Install]
+WantedBy=multi-user.target

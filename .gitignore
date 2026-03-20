@@ -1,0 +1,34 @@
+# Build outputs
+deeppacketai
+deeppacketai.exe
+deeppacketai.dbd
+main.exe
+cmd.exe
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+
+# Environment / secrets
+.env
+
+# PCAP sample files (large binaries)
+*.pcap
+*.pcapng
+
+# Frontend
+deeppacketai-ui/dist/
+deeppacketai-ui/node_modules/
+
+# Uploads directory contents
+uploads/*
+!uploads/.gitkeep
+
+# Stray files created by Windows shell redirects
+nul
+.gitignoreecho
+
+# OS
+.DS_Store
+Thumbs.db

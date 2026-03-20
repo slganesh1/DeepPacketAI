@@ -1,0 +1,21 @@
+# Normalize line endings: store LF in repo, checkout as native on each OS
+* text=auto eol=lf
+
+# Force LF for these file types always
+*.go    text eol=lf
+*.ts    text eol=lf
+*.tsx   text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.sh    text eol=lf
+*.md    text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+
+# Binaries — no line ending conversion
+*.db    binary
+*.pcap  binary
+*.pcapng binary
+*.svg   binary
+*.png   binary
+*.jpg   binary

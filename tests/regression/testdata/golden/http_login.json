@@ -1,0 +1,11 @@
+{
+  "flow_count": 3,
+  "flow_types": [
+    "HTTP",
+    "TCP",
+    "WebSocket"
+  ],
+  "alert_count": 0,
+  "alert_titles": [],
+  "call_count": 0
+}

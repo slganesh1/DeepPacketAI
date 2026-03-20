@@ -1,0 +1,40 @@
+{
+  "flow_count": 24,
+  "flow_types": [
+    "DNS",
+    "UDP"
+  ],
+  "alert_count": 40,
+  "alert_titles": [
+    "DNS TIMEOUT: YW5vdGhlcmxvbmdzdWJkb21haW5mb3J0ZXN0aW5ncHVycG9z.evil.com",
+    "DNS TIMEOUT: ZGF0YXRyYW5zZmVydmlhZG5zdHVubmVsaW5ncHJvdG9jb2xs.evil.com",
+    "DNS TIMEOUT: ZW5jb2RlZHBheWxvYWRkYXRhYmFzZTY0dHVubmVsaW5naGVy.evil.com",
+    "DNS TIMEOUT: aGVsbG8td29ybGQtdGhpcy1pcy1hLXZlcnlsb25nc3ViZG9t.evil.com",
+    "DNS TIMEOUT: bG9uZ3N1YmRvbWFpbnN0cmluZ251bWJlcm5pbmV0ZXN0aW5n.evil.com",
+    "DNS TIMEOUT: bG9uZ3N1YmRvbWFpbnN0cmluZ251bWJlcmVpZ2h0dGVzdGlu.evil.com",
+    "DNS TIMEOUT: bG9uZ3N1YmRvbWFpbnN0cmluZ251bWJlcmVsZXZlbnRlc3Rp.evil.com",
+    "DNS TIMEOUT: bG9uZ3N1YmRvbWFpbnN0cmluZ251bWJlcnNldmVudGVzdGluZ.evil.com",
+    "DNS TIMEOUT: bG9uZ3N1YmRvbWFpbnN0cmluZ251bWJlcnR3ZWx2ZXRlc3Rp.evil.com",
+    "DNS TIMEOUT: bG9uZ3N1YmRvbWFpbnN0cmluZ251bWJlcnRlbnRlc3Rpbmdh.evil.com",
+    "DNS TIMEOUT: c29tZWxvbmdyYW5kb21kYXRhc3RyaW5nZm9yZG5zdHVubmVs.evil.com",
+    "DNS TIMEOUT: dGVzdGluZzEyMzQ1Njc4OTBhYmNkZWZnaGlqa2xtbm9wcXJz.evil.com",
+    "DNS Tunneling: evil.com (score=6)",
+    "Protocol Mismatch (port 53)",
+    "Repeated Failures: DNS:TIMEOUT (12 times)",
+    "Suspected DGA/C2 Domain: YW5vdGhlcmxvbmdzdWJkb21haW5mb3J0ZXN0aW5ncHVycG9z.evil.com",
+    "Suspected DGA/C2 Domain: ZGF0YXRyYW5zZmVydmlhZG5zdHVubmVsaW5ncHJvdG9jb2xs.evil.com",
+    "Suspected DGA/C2 Domain: ZW5jb2RlZHBheWxvYWRkYXRhYmFzZTY0dHVubmVsaW5naGVy.evil.com",
+    "Suspected DGA/C2 Domain: aGVsbG8td29ybGQtdGhpcy1pcy1hLXZlcnlsb25nc3ViZG9t.evil.com",
+    "Suspected DGA/C2 Domain: bG9uZ3N1YmRvbWFpbnN0cmluZ251bWJlcm5pbmV0ZXN0aW5n.evil.com",
+    "Suspected DGA/C2 Domain: bG9uZ3N1YmRvbWFpbnN0cmluZ251bWJlcmVpZ2h0dGVzdGlu.evil.com",
+    "Suspected DGA/C2 Domain: bG9uZ3N1YmRvbWFpbnN0cmluZ251bWJlcmVsZXZlbnRlc3Rp.evil.com",
+    "Suspected DGA/C2 Domain: bG9uZ3N1YmRvbWFpbnN0cmluZ251bWJlcnNldmVudGVzdGluZ.evil.com",
+    "Suspected DGA/C2 Domain: bG9uZ3N1YmRvbWFpbnN0cmluZ251bWJlcnR3ZWx2ZXRlc3Rp.evil.com",
+    "Suspected DGA/C2 Domain: bG9uZ3N1YmRvbWFpbnN0cmluZ251bWJlcnRlbnRlc3Rpbmdh.evil.com",
+    "Suspected DGA/C2 Domain: c29tZWxvbmdyYW5kb21kYXRhc3RyaW5nZm9yZG5zdHVubmVs.evil.com",
+    "Suspected DGA/C2 Domain: dGVzdGluZzEyMzQ1Njc4OTBhYmNkZWZnaGlqa2xtbm9wcXJz.evil.com",
+    "Traffic Concentration: 10.0.0.1 (source)",
+    "Traffic Concentration: 8.8.8.8 (destination)"
+  ],
+  "call_count": 0
+}

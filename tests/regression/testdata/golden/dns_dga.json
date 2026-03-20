@@ -1,0 +1,25 @@
+{
+  "flow_count": 10,
+  "flow_types": [
+    "DNS",
+    "UDP"
+  ],
+  "alert_count": 18,
+  "alert_titles": [
+    "DNS TIMEOUT: b8h3q7y5s2n9r4t.ru",
+    "DNS TIMEOUT: n2f7r5t9m3k6p1w.ru",
+    "DNS TIMEOUT: w6p1m4f8k3z7n2s.ru",
+    "DNS TIMEOUT: xk3mq9p2r7n5t8y.ru",
+    "DNS TIMEOUT: z9w4s6h1c0v3b8q.ru",
+    "Protocol Mismatch (port 53)",
+    "Repeated Failures: DNS:TIMEOUT (5 times)",
+    "Suspected DGA/C2 Domain: b8h3q7y5s2n9r4t.ru",
+    "Suspected DGA/C2 Domain: n2f7r5t9m3k6p1w.ru",
+    "Suspected DGA/C2 Domain: w6p1m4f8k3z7n2s.ru",
+    "Suspected DGA/C2 Domain: xk3mq9p2r7n5t8y.ru",
+    "Suspected DGA/C2 Domain: z9w4s6h1c0v3b8q.ru",
+    "Traffic Concentration: 10.0.0.1 (source)",
+    "Traffic Concentration: 8.8.8.8 (destination)"
+  ],
+  "call_count": 0
+}
