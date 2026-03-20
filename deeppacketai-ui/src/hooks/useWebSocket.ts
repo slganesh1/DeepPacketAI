@@ -11,8 +11,16 @@ interface UseWebSocketOptions {
   reconnectInterval?: number;
 }
 
+// Build the WebSocket URL from the current page origin so it works in both
+// local dev (ws://localhost:8080/ws) and production (wss://server/ws via Nginx).
+function defaultWsUrl(): string {
+  if (import.meta.env.DEV) return "ws://localhost:8080/ws";
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${window.location.host}/ws`;
+}
+
 export function useWebSocket({
-  url = "ws://localhost:8080/ws",
+  url = defaultWsUrl(),
   onMessage,
   reconnectInterval = 3000,
 }: UseWebSocketOptions = {}) {

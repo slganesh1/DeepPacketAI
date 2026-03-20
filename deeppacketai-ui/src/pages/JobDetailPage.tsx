@@ -485,7 +485,7 @@ function FlowDetail({ flow }: { flow: JobFlow }) {
                 <YAxis tick={{ fontSize: 9, fill: "#64748b" }} tickFormatter={v => v >= 1000 ? `${(v/1000).toFixed(0)}K` : v} width={36} />
                 <Tooltip
                   contentStyle={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 6, fontSize: 11 }}
-                  formatter={(v: number) => [fmtBps(v), "bps"]}
+                  formatter={(v: number | undefined) => [fmtBps(v ?? 0), "bps"]}
                   labelFormatter={l => `t=${l}s`}
                 />
                 <Area type="monotone" dataKey="bps" stroke="#34d399" strokeWidth={1.5} fill="url(#tpGrad)" dot={false} />
@@ -504,7 +504,7 @@ function FlowDetail({ flow }: { flow: JobFlow }) {
                 <YAxis dataKey="ms" type="number" tick={{ fontSize: 9, fill: "#64748b" }} tickFormatter={v => `${v}`} width={36} name="ms" />
                 <Tooltip
                   contentStyle={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 6, fontSize: 11 }}
-                  formatter={(v: number, name: string) => [name === "ms" ? `${v}ms` : `${v}s`, name === "ms" ? "RTT" : "Time"]}
+                  formatter={(v: number | undefined, name: string | undefined) => [name === "ms" ? `${v ?? 0}ms` : `${v ?? 0}s`, name === "ms" ? "RTT" : "Time"]}
                 />
                 <Scatter data={rttSamples} fill="#60a5fa" opacity={0.8} />
               </ScatterChart>
@@ -528,7 +528,7 @@ function FlowDetail({ flow }: { flow: JobFlow }) {
                 <YAxis tick={{ fontSize: 9, fill: "#64748b" }} tickFormatter={v => `${v}`} width={36} />
                 <Tooltip
                   contentStyle={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 6, fontSize: 11 }}
-                  formatter={(v: number) => [`${v.toFixed(1)}ms`, "Jitter"]}
+                  formatter={(v: number | undefined) => [`${(v ?? 0).toFixed(1)}ms`, "Jitter"]}
                 />
                 <Area type="monotone" dataKey="ms" stroke="#f59e0b" strokeWidth={1.5} fill="url(#jitGrad)" dot={false} />
               </AreaChart>
@@ -1030,8 +1030,6 @@ function ReportsTab({ jobId, rfc2544, y1564, loading }: { jobId: number; rfc2544
   const [thresholds, setThresholds] = useState({ latency_ms: '', jitter_ms: '', loss_pct: '' });
   const [customY1564, setCustomY1564] = useState<any>(null);
   const [applyingThresholds, setApplyingThresholds] = useState(false);
-  const { api: apiClient } = { api: { get: (url: string) => import('../api/client').then(m => m.api.get(url)) } };
-
   const applyThresholds = async () => {
     setApplyingThresholds(true);
     try {

@@ -64,7 +64,8 @@ export function sendMessageStream(
 ): AbortController {
   const controller = new AbortController();
 
-  fetch(`http://localhost:8080/api/v1/chat/conversations/${conversationId}/messages`, {
+  const apiBase = import.meta.env.PROD ? "/api/v1" : "http://localhost:8080/api/v1";
+  fetch(`${apiBase}/chat/conversations/${conversationId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({

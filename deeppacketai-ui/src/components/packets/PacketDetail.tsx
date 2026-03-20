@@ -325,7 +325,7 @@ interface HexData {
   rows: HexRow[];
 }
 
-function HexTab({ packetId, packetLength }: { packetId: number; packetLength: number }) {
+function HexTab({ packetId }: { packetId: number; packetLength: number }) {
   const [hexData, setHexData] = useState<HexData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
