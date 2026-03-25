@@ -1,0 +1,191 @@
+# ============================================================================
+# DeepPacketAI Release Workflow
+#
+# Triggers on: push of a version tag (e.g. v1.0.0)
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# Produces:
+#   Windows  -> DeepPacketAI-Setup.exe      (Inno Setup installer)
+#   Linux    -> DeepPacketAI-1.0.0-x86_64.AppImage + deeppacketai_1.0.0_amd64.deb
+#   macOS    -> DeepPacketAI-1.0.0.dmg
+#
+# All artifacts are attached to the GitHub Release automatically.
+# ============================================================================
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write   # needed to create GitHub releases
+
+jobs:
+
+  # --------------------------------------------------------------------------
+  # Windows: .exe installer via Inno Setup
+  # --------------------------------------------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install WinPcap/Npcap SDK (for gopacket CGO)
+        run: |
+          curl -Lo npcap-sdk.zip https://npcap.com/dist/npcap-sdk-1.13.zip
+          Expand-Archive npcap-sdk.zip -DestinationPath C:\npcap-sdk
+          echo "CGO_CFLAGS=-I C:/npcap-sdk/Include" >> $env:GITHUB_ENV
+          echo "CGO_LDFLAGS=-L C:/npcap-sdk/Lib/x64" >> $env:GITHUB_ENV
+
+      - name: Download Npcap installer (bundle into setup.exe)
+        run: |
+          curl -Lo installer\npcap-installer.exe https://npcap.com/dist/npcap-1.80.exe
+        # NOTE: Check https://npcap.com/#download for the latest version
+
+      - name: Build React UI
+        run: |
+          cd deeppacketai-ui
+          npm ci
+          npm run build
+
+      - name: Build Go binary (windowsgui)
+        run: |
+          go build "-ldflags=-s -w -H windowsgui" -o installer\deeppacketai.exe .\cmd\
+
+      - name: Build installer with Inno Setup
+        run: |
+          choco install innosetup -y
+          ISCC installer\deeppacketai.iss
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: installer/Output/DeepPacketAI-Setup.exe
+
+  # --------------------------------------------------------------------------
+  # Linux: AppImage + .deb
+  # --------------------------------------------------------------------------
+  build-linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libpcap-dev gcc
+
+      - name: Build React UI
+        run: |
+          cd deeppacketai-ui
+          npm ci
+          npm run build
+
+      - name: Build Go binary
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          CGO_ENABLED=1 go build -ldflags="-s -w" -o bin/deeppacketai ./cmd/
+
+      - name: Build AppImage + .deb
+        run: |
+          chmod +x build-linux.sh
+          VERSION=${GITHUB_REF_NAME#v} ./build-linux.sh --appimage --deb
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist/
+
+  # --------------------------------------------------------------------------
+  # macOS: .dmg
+  # --------------------------------------------------------------------------
+  build-macos:
+    runs-on: macos-14    # Apple Silicon runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Build React UI
+        run: |
+          cd deeppacketai-ui
+          npm ci
+          npm run build
+
+      - name: Build Go binary + .app + .dmg
+        run: |
+          chmod +x build-mac.sh
+          VERSION=${GITHUB_REF_NAME#v} ./build-mac.sh --dmg
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-dmg
+          path: dist/*.dmg
+
+  # --------------------------------------------------------------------------
+  # GitHub Release: attach all artifacts
+  # --------------------------------------------------------------------------
+  release:
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "DeepPacketAI ${{ github.ref_name }}"
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/windows-installer/DeepPacketAI-Setup.exe
+            artifacts/linux-packages/*.AppImage
+            artifacts/linux-packages/*.deb
+            artifacts/macos-dmg/*.dmg
+          body: |
+            ## DeepPacketAI ${{ github.ref_name }}
+
+            ### Downloads
+            | Platform | File | Notes |
+            |---|---|---|
+            | Windows 10/11 | `DeepPacketAI-Setup.exe` | Installs Npcap automatically |
+            | Linux (any distro) | `.AppImage` | `chmod +x` then double-click |
+            | Ubuntu/Debian | `.deb` | `sudo dpkg -i deeppacketai_*.deb` |
+            | macOS 12+ | `.dmg` | Drag to Applications |
+
+            ### First run
+            - **All platforms:** A browser window opens automatically at `http://localhost:8080`
+            - **Linux live capture:** `sudo deeppacketai` (needs root for raw packet access)
+            - **macOS live capture:** `sudo deeppacketai` or grant permissions via System Settings

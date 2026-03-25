@@ -1,8 +1,11 @@
 package capture
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -119,8 +122,46 @@ func createSessionDecodersRaw() []protocols.Decoder {
 	}
 }
 
+// normalizeBPFFilter converts user-friendly shorthand into valid BPF syntax.
+// Examples:
+//
+//	"5060"       -> "port 5060"
+//	"5060,5061"  -> "port 5060 or port 5061"
+//	"port 5060"  -> "port 5060"  (already valid, unchanged)
+//	""           -> ""           (no filter)
+var barePortRe = regexp.MustCompile(`^\d+$`)
+
+func normalizeBPFFilter(f string) string {
+	f = strings.TrimSpace(f)
+	if f == "" {
+		return f
+	}
+	// If it's a single bare number, wrap it as "port <n>"
+	if barePortRe.MatchString(f) {
+		return "port " + f
+	}
+	// If it's a comma-separated list of bare numbers, expand each one
+	parts := strings.Split(f, ",")
+	allPorts := true
+	for _, p := range parts {
+		if !barePortRe.MatchString(strings.TrimSpace(p)) {
+			allPorts = false
+			break
+		}
+	}
+	if allPorts && len(parts) > 1 {
+		var exprs []string
+		for _, p := range parts {
+			exprs = append(exprs, "port "+strings.TrimSpace(p))
+		}
+		return strings.Join(exprs, " or ")
+	}
+	return f
+}
+
 // StartCapture begins live packet capture on the given interface.
 func (e *Engine) StartCapture(iface, bpfFilter string) (*Session, error) {
+	bpfFilter = normalizeBPFFilter(bpfFilter)
 	sources, err := e.factory.CreateSources(iface, bpfFilter, e.cfg.WorkerCount, e.cfg)
 	if err != nil {
 		return nil, fmt.Errorf("create capture sources: %w", err)
@@ -338,6 +379,20 @@ func (e *Engine) statsLoop(session *Session, stats *Stats, sources []CaptureSour
 				Type:    ws.MsgStats,
 				Payload: payload,
 			})
+
+			// Persist this tick to the database for the bandwidth chart
+			if e.db != nil && snap.PacketsPerSec > 0 {
+				protoJSON, _ := json.Marshal(snap.ProtocolCounts)
+				_ = e.db.StoreTrafficStats([]storage.TrafficStatsRecord{{
+					JobID:              &session.JobID,
+					SessionID:          session.ID,
+					Timestamp:          time.Now().UTC().Format("15:04:05"),
+					IntervalSec:        1,
+					PacketsPerSec:      int(snap.PacketsPerSec),
+					BytesPerSec:        int(snap.BytesPerSec),
+					ProtocolCountsJSON: string(protoJSON),
+				}})
+			}
 		}
 	}
 }

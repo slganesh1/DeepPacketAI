@@ -17,14 +17,19 @@ import (
 )
 
 type UploadHandler struct {
-	store    storage.Store
-	executor *execution.Executor
+	store      storage.Store
+	executor   *execution.Executor
+	uploadsDir string
 }
 
-func NewUploadHandler(db storage.Store) *UploadHandler {
+func NewUploadHandler(db storage.Store, uploadsDir string) *UploadHandler {
+	if uploadsDir == "" {
+		uploadsDir = "uploads"
+	}
 	return &UploadHandler{
-		store:    db,
-		executor: execution.NewExecutor(db),
+		store:      db,
+		executor:   execution.NewExecutor(db),
+		uploadsDir: uploadsDir,
 	}
 }
 
@@ -45,7 +50,7 @@ func (h *UploadHandler) UploadPCAP(w http.ResponseWriter, r *http.Request) {
 	defer file.Close()
 
 	// Ensure uploads directory exists
-	uploadsDir := "uploads"
+	uploadsDir := h.uploadsDir
 	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create uploads directory"})
 		return

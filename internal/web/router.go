@@ -1,8 +1,10 @@
 package web
 
 import (
+	"io/fs"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"DeepPacketAI/internal/ai"
@@ -18,13 +20,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiRegistry *ai.ProviderRegistry) http.Handler {
+func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiRegistry *ai.ProviderRegistry, uiAssets fs.FS, uploadsDir string) http.Handler {
 	r := chi.NewRouter()
 
 	// ---- CORS ----
 	allowedOrigins := []string{
-		"http://localhost:5173",              // local dev
-		"https://64.227.168.88",              // production (HTTPS via Nginx)
+		"http://localhost:5173", // local dev (vite)
+		"http://localhost:8080", // embedded UI (installer mode)
+		"https://64.227.168.88", // production (HTTPS via Nginx)
 	}
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   allowedOrigins,
@@ -46,7 +49,7 @@ func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiR
 	entityDetailHandler := handlers.NewEntityDetailHandler(db)
 	entityEventHandler := handlers.NewEntityEventHandler(db)
 	entityMetricsHandler := handlers.NewEntityMetricsHandler(db)
-	uploadHandler := handlers.NewUploadHandler(db)
+	uploadHandler := handlers.NewUploadHandler(db, uploadsDir)
 	captureHandler := handlers.NewCaptureHandler(captureEngine)
 	statsHandler := handlers.NewStatsHandler(db)
 	alertHandler := handlers.NewAlertHandler(db)
@@ -155,6 +158,24 @@ func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiR
 		r.Put("/chat/settings", chatHandler.SetSettings)
 		}) // end RequireAuth group
 	}) // end /api/v1
+
+	// ---- Embedded React SPA (installer / standalone mode) ----
+	// Only mounted when UIAssets is provided (i.e. built with go:embed).
+	if uiAssets != nil {
+		distFS, err := fs.Sub(uiAssets, "dist")
+		if err == nil {
+			fileServer := http.FileServer(http.FS(distFS))
+			r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+				// Serve the file if it exists; otherwise return index.html
+				// so React Router handles client-side navigation.
+				filePath := strings.TrimPrefix(r.URL.Path, "/")
+				if _, statErr := fs.Stat(distFS, filePath); statErr != nil {
+					r.URL.Path = "/"
+				}
+				fileServer.ServeHTTP(w, r)
+			})
+		}
+	}
 
 	return r
 }

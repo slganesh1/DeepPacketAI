@@ -29,6 +29,11 @@ uploads/*
 nul
 .gitignoreecho
 
+# Installer build artifacts
+installer/Output/
+installer/npcap-installer.exe
+installer/desktop.ini
+
 # OS
 .DS_Store
 Thumbs.db

@@ -62,14 +62,21 @@ func (h *StatsHandler) TopTalkers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-// Bandwidth returns time-series bandwidth data.
+// Bandwidth returns time-series bandwidth data in chronological order.
 // If session_id is provided, filters to that session; otherwise returns the latest 300 records.
 func (h *StatsHandler) Bandwidth(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("session_id")
 	records, err := h.store.QueryTrafficStats(sessionID, 300)
-	if err != nil {
+	if err != nil || len(records) == 0 {
 		writeJSON(w, http.StatusOK, []any{})
 		return
+	}
+
+	// Records from DB are DESC (newest first); reverse to ASC for chart left→right rendering
+	if sessionID == "" {
+		for i, j := 0, len(records)-1; i < j; i, j = i+1, j-1 {
+			records[i], records[j] = records[j], records[i]
+		}
 	}
 
 	writeJSON(w, http.StatusOK, records)

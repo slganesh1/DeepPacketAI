@@ -198,15 +198,51 @@ export default function CapturePage() {
           <div className="flex-1">
             <label className="block text-xs text-slate-400 mb-1">
               BPF Filter
+              <span className="ml-2 text-slate-600 font-normal">
+                — use <code className="text-slate-400">port 5060</code>, <code className="text-slate-400">udp</code>, <code className="text-slate-400">host 1.2.3.4</code>, etc.
+              </span>
             </label>
-            <input
-              type="text"
-              value={bpfFilter}
-              onChange={(e) => setBpfFilter(e.target.value)}
-              disabled={capturing}
-              placeholder="e.g. port 5060 or udp"
-              className="w-full bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
-            />
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={bpfFilter}
+                onChange={(e) => setBpfFilter(e.target.value)}
+                disabled={capturing}
+                placeholder="e.g. port 5060 or udp port 53"
+                className="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
+              />
+              <select
+                disabled={capturing}
+                value=""
+                onChange={(e) => { if (e.target.value) setBpfFilter(e.target.value); }}
+                className="bg-slate-700 border border-slate-600 rounded-lg px-2 py-2 text-sm text-slate-300 focus:outline-none focus:ring-2 focus:ring-emerald-500 disabled:opacity-50"
+                title="Quick filter presets"
+              >
+                <option value="">Presets…</option>
+                <optgroup label="VoIP / Telecom">
+                  <option value="port 5060">SIP (port 5060)</option>
+                  <option value="port 5060 or port 5061">SIP + TLS (5060/5061)</option>
+                  <option value="udp portrange 16384-32767">RTP (16384-32767)</option>
+                  <option value="port 2123 or port 2152">GTP (2123/2152)</option>
+                  <option value="port 3868">Diameter (3868)</option>
+                  <option value="port 36412">S1AP (36412)</option>
+                </optgroup>
+                <optgroup label="Common Protocols">
+                  <option value="port 53">DNS (53)</option>
+                  <option value="port 80">HTTP (80)</option>
+                  <option value="port 443">HTTPS/TLS (443)</option>
+                  <option value="port 22">SSH (22)</option>
+                </optgroup>
+                <optgroup label="Transport">
+                  <option value="tcp">TCP only</option>
+                  <option value="udp">UDP only</option>
+                  <option value="icmp">ICMP only</option>
+                </optgroup>
+                <optgroup label="Clear">
+                  <option value=" ">No filter (all traffic)</option>
+                </optgroup>
+              </select>
+            </div>
           </div>
 
           <div className="pt-5">
@@ -299,7 +335,15 @@ export default function CapturePage() {
               <ChevronRight className="w-4 h-4" />
             </button>
             <button
-              onClick={() => navigate(`/chat`)}
+              onClick={() =>
+                navigate("/chat", {
+                  state: {
+                    packets: recentPackets.slice(0, 50),
+                    alerts,
+                    jobId,
+                  },
+                })
+              }
               className="flex items-center gap-2 px-4 py-2 bg-blue-500/20 text-blue-400 border border-blue-500/30 rounded-lg text-sm font-medium hover:bg-blue-500/30 transition-colors"
             >
               Ask AI

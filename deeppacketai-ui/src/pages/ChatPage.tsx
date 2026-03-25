@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { MessageSquare, Send, Plus, Trash2, Settings } from "lucide-react";
+import { useLocation } from "react-router-dom";
+import { MessageSquare, Send, Plus, Trash2, Settings, Radio } from "lucide-react";
 import {
   createConversation,
   fetchConversations,
@@ -10,8 +11,18 @@ import {
   sendMessageStream,
 } from "../api/chat";
 import type { Conversation, ChatMessage } from "../api/chat";
+import { useWebSocket } from "../hooks/useWebSocket";
+import { api } from "../api/client";
 
 export default function ChatPage() {
+  const location = useLocation();
+  const captureState = location.state as {
+    packets?: object[];
+    alerts?: object[];
+    jobId?: number;
+    jobName?: string;
+  } | null;
+
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConv, setActiveConv] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -21,10 +32,21 @@ export default function ChatPage() {
   const [providers, setProviders] = useState<string[]>([]);
   const [activeProvider, setActiveProviderState] = useState("");
   const [showSettings, setShowSettings] = useState(false);
+  const [livePackets, setLivePackets] = useState<object[]>([]);
+  const [useLiveContext, setUseLiveContext] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const sendingRef = useRef(false);
   const streamingTextRef = useRef("");
+  const captureContextSentRef = useRef(false);
+
+  const { connected: wsConnected } = useWebSocket({
+    onMessage: (msg) => {
+      if (msg.type === "packet") {
+        setLivePackets((prev) => [...prev.slice(-49), msg.payload]);
+      }
+    },
+  });
 
   useEffect(() => {
     fetchConversations().then(setConversations).catch(() => {});
@@ -34,6 +56,111 @@ export default function ChatPage() {
         setActiveProviderState(data.active || "");
       })
       .catch(() => {});
+  }, []);
+
+  // Auto-create conversation when navigated from capture page or job detail page
+  useEffect(() => {
+    if (!captureState?.jobId || captureContextSentRef.current) return;
+    captureContextSentRef.current = true;
+
+    const autoStart = async () => {
+      try {
+        const jobId = captureState.jobId!;
+        const label = captureState.jobName
+          ? captureState.jobName.replace(/^live-capture:/, "")
+          : `Job #${jobId}`;
+        const conv = await createConversation(`Analysis: ${label}`);
+        setConversations((prev) => [conv, ...prev]);
+        setActiveConv(conv.id);
+        setMessages([]);
+
+        // Use packets passed directly (from capture page), or fetch events from API
+        let contextData: object[] = captureState.packets ?? [];
+        let alertSummary = "";
+
+        if (contextData.length === 0) {
+          // Navigated from job detail — fetch events and flows as context
+          const [eventsRes, flowsRes] = await Promise.all([
+            api.get(`/jobs/${jobId}/events`).then(r => r.data).catch(() => []),
+            api.get(`/jobs/${jobId}/flows`).then(r => r.data).catch(() => []),
+          ]);
+          contextData = [...(eventsRes ?? []).slice(0, 20), ...(flowsRes ?? []).slice(0, 20)];
+          const events = eventsRes ?? [];
+          if (events.length > 0) {
+            alertSummary = `\n\nEvents/alerts detected (${events.length}):\n` +
+              JSON.stringify(events.slice(0, 10), null, 2);
+          }
+        } else {
+          const alerts = captureState.alerts ?? [];
+          if (alerts.length > 0) {
+            alertSummary = `\n\nAlerts detected (${alerts.length}):\n` +
+              JSON.stringify(alerts.slice(0, 10), null, 2);
+          }
+        }
+
+        const question = `Please analyze this network capture (Job #${jobId}) and explain what is happening on the network. Identify any issues, anomalies, or noteworthy patterns.${alertSummary}`;
+        const context = JSON.stringify(contextData.slice(0, 50));
+
+        // Show user message immediately
+        setMessages([
+          {
+            id: Date.now(),
+            conversation_id: conv.id,
+            role: "user",
+            content: question,
+            created_at: new Date().toISOString(),
+          },
+        ]);
+        setStreaming(true);
+        setStreamingText("");
+        streamingTextRef.current = "";
+
+        sendMessageStream(
+          conv.id,
+          question,
+          context,
+          (chunk) => {
+            streamingTextRef.current += chunk;
+            setStreamingText(streamingTextRef.current);
+          },
+          () => {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now() + 1,
+                conversation_id: conv.id,
+                role: "assistant",
+                content: streamingTextRef.current,
+                created_at: new Date().toISOString(),
+              },
+            ]);
+            setStreamingText("");
+            streamingTextRef.current = "";
+            setStreaming(false);
+          },
+          (err) => {
+            setStreaming(false);
+            setStreamingText("");
+            streamingTextRef.current = "";
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now() + 1,
+                conversation_id: conv.id,
+                role: "assistant",
+                content: `Error: ${err}`,
+                created_at: new Date().toISOString(),
+              },
+            ]);
+          }
+        );
+      } catch {
+        // ignore
+      }
+    };
+
+    autoStart();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -94,10 +221,15 @@ export default function ChatPage() {
     setStreamingText("");
     streamingTextRef.current = "";
 
+    const packetCtx =
+      useLiveContext && livePackets.length > 0
+        ? JSON.stringify(livePackets.slice(-20))
+        : undefined;
+
     abortRef.current = sendMessageStream(
       activeConv,
       userContent,
-      undefined,
+      packetCtx,
       (chunk) => {
         streamingTextRef.current += chunk;
         setStreamingText(streamingTextRef.current);
@@ -273,6 +405,28 @@ export default function ChatPage() {
 
             {/* Input */}
             <div className="border-t border-slate-700/50 p-4">
+              {/* Live context toggle */}
+              <div className="flex items-center gap-2 mb-2">
+                <button
+                  onClick={() => setUseLiveContext((v) => !v)}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs border transition-colors ${
+                    useLiveContext
+                      ? "bg-emerald-500/20 border-emerald-500/40 text-emerald-400"
+                      : "bg-slate-700/50 border-slate-600/50 text-slate-500 hover:text-slate-300"
+                  }`}
+                >
+                  <Radio className="w-3 h-3" />
+                  Live context {useLiveContext ? "ON" : "OFF"}
+                </button>
+                {wsConnected && (
+                  <span className="text-xs text-slate-500">
+                    {livePackets.length} packets captured
+                  </span>
+                )}
+                {!wsConnected && (
+                  <span className="text-xs text-slate-600">WS disconnected</span>
+                )}
+              </div>
               <div className="flex items-center gap-3">
                 <input
                   type="text"

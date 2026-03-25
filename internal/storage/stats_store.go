@@ -49,10 +49,11 @@ func (s *SQLiteStore) QueryTrafficStats(sessionID string, limit int) ([]TrafficS
 	var args []any
 
 	if sessionID != "" {
-		query = "SELECT id, job_id, session_id, timestamp, interval_sec, packets_per_sec, bytes_per_sec, protocol_counts_json FROM traffic_stats WHERE session_id = ? ORDER BY timestamp DESC"
+		query = "SELECT id, job_id, session_id, timestamp, interval_sec, packets_per_sec, bytes_per_sec, protocol_counts_json FROM traffic_stats WHERE session_id = ? ORDER BY id ASC"
 		args = []any{sessionID}
 	} else {
-		query = "SELECT id, job_id, session_id, timestamp, interval_sec, packets_per_sec, bytes_per_sec, protocol_counts_json FROM traffic_stats ORDER BY timestamp DESC"
+		// Fetch the most recent N records (DESC), then reverse to chronological order for chart rendering
+		query = "SELECT id, job_id, session_id, timestamp, interval_sec, packets_per_sec, bytes_per_sec, protocol_counts_json FROM traffic_stats ORDER BY id DESC"
 	}
 
 	if limit > 0 {

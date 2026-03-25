@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"io/fs"
 	"log"
 	"net/http"
 
@@ -18,6 +19,10 @@ type Config struct {
 	Hub           *ws.Hub
 	CaptureEngine *capture.Engine
 	AIRegistry    *ai.ProviderRegistry
+	// UIAssets is the embedded React production build. If nil, no UI is served.
+	UIAssets fs.FS
+	// UploadsDir is the directory where uploaded PCAP files are stored.
+	UploadsDir string
 }
 
 // Server wraps the HTTP server
@@ -27,6 +32,8 @@ type Server struct {
 	hub           *ws.Hub
 	captureEngine *capture.Engine
 	aiRegistry    *ai.ProviderRegistry
+	uiAssets      fs.FS
+	uploadsDir    string
 }
 
 // NewServer creates a new API server
@@ -37,12 +44,14 @@ func NewServer(cfg Config) *Server {
 		hub:           cfg.Hub,
 		captureEngine: cfg.CaptureEngine,
 		aiRegistry:    cfg.AIRegistry,
+		uiAssets:      cfg.UIAssets,
+		uploadsDir:    cfg.UploadsDir,
 	}
 }
 
 // Start starts the HTTP server (BLOCKING)
 func (s *Server) Start(ctx context.Context) error {
-	router := NewRouter(s.db, s.hub, s.captureEngine, s.aiRegistry)
+	router := NewRouter(s.db, s.hub, s.captureEngine, s.aiRegistry, s.uiAssets, s.uploadsDir)
 
 	log.Printf("API server listening on %s", s.addr)
 

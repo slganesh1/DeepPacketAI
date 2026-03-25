@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Required for Go binaries -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <false/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+
+  <!-- Network access -->
+  <key>com.apple.security.network.client</key>
+  <true/>
+  <key>com.apple.security.network.server</key>
+  <true/>
+
+  <!-- Raw packet capture (live capture feature) -->
+  <!-- Note: full packet capture on macOS requires running with sudo
+       or granting the binary special permissions via:
+       sudo chmod +s /path/to/deeppacketai  -->
+  <key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
+  <array/>
+</dict>
+</plist>

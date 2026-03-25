@@ -1,6 +1,7 @@
 [Unit]
 Description=DeepPacketAI Telecom Analyzer
 After=network.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -8,20 +9,33 @@ User=deeppacketai
 Group=deeppacketai
 WorkingDirectory=/opt/deeppacketai
 
-# Environment variables — set your API key here
+# Environment variables (API keys)
 EnvironmentFile=/opt/deeppacketai/.env
 
-ExecStart=/opt/deeppacketai/deeppacketai -server
+# Set HOME so os.UserHomeDir() resolves to the writable app directory
+# (the deeppacketai system user has no real home dir)
+Environment=HOME=/opt/deeppacketai
+
+# Start the server (-server flag keeps it backwards compatible)
+ExecStart=/opt/deeppacketai/deeppacketai -server -no-browser
+
+# Restart policy
 Restart=on-failure
 RestartSec=5s
 
-# Security hardening
-NoNewPrivileges=true
+# ---- Live packet capture requires raw socket access ----
+# AmbientCapabilities grants CAP_NET_RAW to the process without root
+NoNewPrivileges=false
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+
+# ---- Filesystem protection ----
 PrivateTmp=true
-ProtectSystem=strict
+ProtectSystem=full
+# Allow writing to app dir (DB, uploads, logs)
 ReadWritePaths=/opt/deeppacketai
 
-# Logging
+# Logging → journalctl -u deeppacketai -f
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=deeppacketai

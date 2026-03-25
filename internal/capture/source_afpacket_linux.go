@@ -136,7 +136,15 @@ func newAFPacketSource(ifIndex int, iface, bpfFilter string, fanoutGroup uint16,
 		return nil, fmt.Errorf("mmap ring: %w", err)
 	}
 
-	// 5. Bind to interface
+	// 5. Attach BPF filter BEFORE bind so no unfiltered packets enter the ring
+	if bpfFilter != "" {
+		if err := attachBPFFilter(fd, bpfFilter, iface); err != nil {
+			unix.Munmap(ring)
+			return nil, fmt.Errorf("attach bpf filter: %w", err)
+		}
+	}
+
+	// 6. Bind to interface (packets start flowing only after this)
 	sll := unix.SockaddrLinklayer{
 		Protocol: htons(ethPAll),
 		Ifindex:  ifIndex,
@@ -144,14 +152,6 @@ func newAFPacketSource(ifIndex int, iface, bpfFilter string, fanoutGroup uint16,
 	if err := unix.Bind(fd, &sll); err != nil {
 		unix.Munmap(ring)
 		return nil, fmt.Errorf("bind to interface: %w", err)
-	}
-
-	// 6. Attach BPF filter if specified
-	if bpfFilter != "" {
-		if err := attachBPFFilter(fd, bpfFilter, iface); err != nil {
-			unix.Munmap(ring)
-			return nil, fmt.Errorf("attach bpf filter: %w", err)
-		}
 	}
 
 	// 7. Join fanout group

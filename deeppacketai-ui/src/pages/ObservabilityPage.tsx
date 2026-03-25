@@ -422,28 +422,34 @@ export default function ObservabilityPage() {
       </div>
 
       {/* ── Prometheus info box ── */}
-      <div className="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4">
-        <div className="text-xs font-semibold text-slate-400 mb-2">Prometheus Scrape Endpoint</div>
-        <div className="grid grid-cols-2 gap-x-8 gap-y-1 text-xs">
-          {[
-            ["Endpoint", "http://localhost:8080/metrics"],
-            ["Format", "OpenMetrics / Prometheus text"],
-            ["Namespace", "deeppacketai_"],
-            ["Scrape interval (recommended)", "15s"],
-          ].map(([k, v]) => (
-            <div key={k} className="flex gap-2">
-              <span className="text-slate-500 w-44">{k}</span>
-              <code className="text-emerald-400 font-mono">{v}</code>
+      {(() => {
+        const metricsEndpoint = `${window.location.protocol}//${window.location.host}/metrics`;
+        const scrapeTarget = window.location.host;
+        const prometheusSnippet =
+          `- job_name: deeppacketai\n  static_configs:\n  - targets: ['${scrapeTarget}']`;
+        return (
+          <div className="bg-slate-800/40 rounded-xl border border-slate-700/30 p-4">
+            <div className="text-xs font-semibold text-slate-400 mb-2">Prometheus Scrape Endpoint</div>
+            <div className="grid grid-cols-2 gap-x-8 gap-y-1 text-xs">
+              {[
+                ["Endpoint", metricsEndpoint],
+                ["Format", "OpenMetrics / Prometheus text"],
+                ["Namespace", "deeppacketai_"],
+                ["Scrape interval (recommended)", "15s"],
+              ].map(([k, v]) => (
+                <div key={k} className="flex gap-2">
+                  <span className="text-slate-500 w-44">{k}</span>
+                  <code className="text-emerald-400 font-mono">{v}</code>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-        <div className="mt-3 text-[10px] text-slate-600">
-          Add to <code className="font-mono">prometheus.yml</code>:&nbsp;
-          <code className="font-mono text-slate-400">
-            {"- job_name: deeppacketai\n  static_configs:\n  - targets: ['localhost:8080']"}
-          </code>
-        </div>
-      </div>
+            <div className="mt-3 text-[10px] text-slate-600">
+              Add to <code className="font-mono">prometheus.yml</code>:&nbsp;
+              <code className="font-mono text-slate-400 whitespace-pre">{prometheusSnippet}</code>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

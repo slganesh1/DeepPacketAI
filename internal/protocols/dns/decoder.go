@@ -196,7 +196,12 @@ func parseQuestion(payload []byte) (string, string) {
 		if offset+length > len(payload) {
 			break
 		}
-		parts = append(parts, string(payload[offset:offset+length]))
+		label := payload[offset : offset+length]
+		// Skip if label contains non-printable bytes (binary/garbled data)
+		if !isValidDNSLabel(label) {
+			return "", ""
+		}
+		parts = append(parts, string(label))
 		offset += length
 	}
 
@@ -335,6 +340,18 @@ func decodeName(payload []byte, offset int) string {
 	}
 
 	return strings.Join(parts, ".")
+}
+
+// isValidDNSLabel returns true if all bytes in the label are printable ASCII
+// (letters, digits, hyphens, underscores). Rejects binary/garbled data.
+func isValidDNSLabel(label []byte) bool {
+	for _, b := range label {
+		if !((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+			(b >= '0' && b <= '9') || b == '-' || b == '_') {
+			return false
+		}
+	}
+	return true
 }
 
 // Ensure Decoder implements StreamingDecoder.

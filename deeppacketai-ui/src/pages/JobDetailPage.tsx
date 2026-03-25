@@ -103,7 +103,7 @@ export default function JobDetailPage() {
             Re-analyze
           </button>
           <button
-            onClick={() => navigate(`/chat`)}
+            onClick={() => navigate(`/chat`, { state: { jobId: numId, jobName: job?.pcap_path } })}
             className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white text-sm rounded-lg transition-colors"
           >
             Ask AI
