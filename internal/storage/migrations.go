@@ -249,6 +249,61 @@ var migrations = []migration{
 		ALTER TABLE packets ADD COLUMN raw_packet BLOB;
 		`,
 	},
+	{
+		version: 5,
+		sql: `
+		-- Alert targets for webhook/Slack/email notifications (version 5)
+		CREATE TABLE IF NOT EXISTS alert_targets (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			name        TEXT NOT NULL,
+			type        TEXT NOT NULL CHECK(type IN ('slack', 'webhook', 'email')),
+			url         TEXT NOT NULL DEFAULT '',
+			config_json TEXT NOT NULL DEFAULT '{}',
+			enabled     INTEGER NOT NULL DEFAULT 1,
+			min_severity TEXT NOT NULL DEFAULT 'warning' CHECK(min_severity IN ('info', 'warning', 'critical')),
+			created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		`,
+	},
+	{
+		version: 6,
+		sql: `
+		-- User-defined detection rules (version 6)
+		CREATE TABLE IF NOT EXISTS user_detection_rules (
+			id             INTEGER PRIMARY KEY AUTOINCREMENT,
+			name           TEXT NOT NULL,
+			description    TEXT NOT NULL DEFAULT '',
+			protocol       TEXT NOT NULL DEFAULT 'ANY',
+			severity       TEXT NOT NULL DEFAULT 'warning' CHECK(severity IN ('info', 'warning', 'error', 'critical')),
+			condition_json TEXT NOT NULL DEFAULT '{}',
+			enabled        INTEGER NOT NULL DEFAULT 1,
+			created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		`,
+	},
+	{
+		version: 7,
+		sql: `
+		-- IP geo + reputation enrichment cache (version 7)
+		CREATE TABLE IF NOT EXISTS ip_enrichments (
+			ip           TEXT PRIMARY KEY,
+			country_code TEXT NOT NULL DEFAULT '',
+			country      TEXT NOT NULL DEFAULT '',
+			city         TEXT NOT NULL DEFAULT '',
+			isp          TEXT NOT NULL DEFAULT '',
+			org          TEXT NOT NULL DEFAULT '',
+			lat          REAL NOT NULL DEFAULT 0,
+			lon          REAL NOT NULL DEFAULT 0,
+			is_hosting   INTEGER NOT NULL DEFAULT 0,
+			is_tor       INTEGER NOT NULL DEFAULT 0,
+			is_proxy     INTEGER NOT NULL DEFAULT 0,
+			abuse_score  INTEGER NOT NULL DEFAULT 0,
+			is_abusive   INTEGER NOT NULL DEFAULT 0,
+			last_checked TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE INDEX IF NOT EXISTS idx_ip_enrichments_country ON ip_enrichments(country_code);
+		`,
+	},
 }
 
 // runMigrations creates the schema_version table if needed, then applies

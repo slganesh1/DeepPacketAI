@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"DeepPacketAI/internal/ai"
+	"DeepPacketAI/internal/alerting"
 	"DeepPacketAI/internal/capture"
+	"DeepPacketAI/internal/geoip"
 	"DeepPacketAI/internal/metrics"
 	"DeepPacketAI/internal/storage"
 	"DeepPacketAI/internal/web/handlers"
@@ -20,7 +22,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiRegistry *ai.ProviderRegistry, uiAssets fs.FS, uploadsDir string) http.Handler {
+func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiRegistry *ai.ProviderRegistry, dispatcher *alerting.Dispatcher, geoEnricher *geoip.Enricher, uiAssets fs.FS, uploadsDir string) http.Handler {
 	r := chi.NewRouter()
 
 	// ---- CORS ----
@@ -59,6 +61,9 @@ func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiR
 	analyticsHandler := handlers.NewAnalyticsHandler(db)
 	telecomHandler := handlers.NewTelecomHandler(db)
 	aiAnalysisHandler := handlers.NewAIAnalysisHandler(db, aiRegistry)
+	alertTargetHandler := handlers.NewAlertTargetHandler(db, dispatcher)
+	detectionRulesHandler := handlers.NewDetectionRulesHandler(db)
+	geoHandler := handlers.NewGeoHandler(db, geoEnricher)
 	pluginHandler := handlers.NewPluginHandler()
 	reportHandler := handlers.NewReportHandler(db)
 	authHandler := handlers.NewAuthHandler()
@@ -116,6 +121,24 @@ func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiR
 
 		// Alerts
 		r.Get("/alerts", alertHandler.ListAlerts)
+
+		// Alert targets (notification rules)
+		r.Get("/alert-targets", alertTargetHandler.List)
+		r.Post("/alert-targets", alertTargetHandler.Create)
+		r.Put("/alert-targets/{id}", alertTargetHandler.Update)
+		r.Delete("/alert-targets/{id}", alertTargetHandler.Delete)
+		r.Post("/alert-targets/{id}/test", alertTargetHandler.Test)
+
+		// User-defined detection rules
+		r.Get("/detection-rules", detectionRulesHandler.List)
+		r.Post("/detection-rules", detectionRulesHandler.Create)
+		r.Put("/detection-rules/{id}", detectionRulesHandler.Update)
+		r.Delete("/detection-rules/{id}", detectionRulesHandler.Delete)
+
+		// GeoIP / IP reputation
+		r.Get("/geo/ip/{ip}", geoHandler.LookupIP)
+		r.Get("/geo/summary", geoHandler.Summary)
+		r.Post("/geo/enrich", geoHandler.EnrichIPs)
 
 		// Packets
 		r.Get("/packets", packetHandler.ListPackets)

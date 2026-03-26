@@ -17,6 +17,9 @@ import TelecomTracePage from "./pages/TelecomTracePage";
 import SecurityPage from "./pages/SecurityPage";
 import ObservabilityPage from "./pages/ObservabilityPage";
 import PluginsPage from "./pages/PluginsPage";
+import AlertingPage from "./pages/AlertingPage";
+import DetectionRulesPage from "./pages/DetectionRulesPage";
+import GeoPage from "./pages/GeoPage";
 
 export default function App() {
   const [authUser, setAuthUser] = useState<string | null>(null);
@@ -65,6 +68,9 @@ export default function App() {
           <Route path="/security" element={<SecurityPage />} />
           <Route path="/observability" element={<ObservabilityPage />} />
           <Route path="/plugins" element={<PluginsPage />} />
+          <Route path="/alerting" element={<AlertingPage />} />
+          <Route path="/detection-rules" element={<DetectionRulesPage />} />
+          <Route path="/geo" element={<GeoPage />} />
         </Routes>
       </AppLayout>
     </BrowserRouter>

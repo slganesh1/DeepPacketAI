@@ -9,6 +9,7 @@ const (
 	MsgAlert        MessageType = "alert"
 	MsgCaptureState MessageType = "capture_state"
 	MsgChatChunk    MessageType = "chat_chunk"
+	MsgAIInsight    MessageType = "ai_insight"
 )
 
 // Message is the envelope sent over WebSocket.

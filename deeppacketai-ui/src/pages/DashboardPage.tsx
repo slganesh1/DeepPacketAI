@@ -6,6 +6,7 @@ import ProtocolPieChart from "../components/dashboard/ProtocolPieChart";
 import TopTalkersTable from "../components/dashboard/TopTalkersTable";
 import AlertsFeed from "../components/dashboard/AlertsFeed";
 import QoSHealthWidget from "../components/dashboard/QoSHealthWidget";
+import AgentsPanel from "../components/AgentsPanel";
 
 export default function DashboardPage() {
   const [summary, setSummary] = useState<any>({});
@@ -32,6 +33,8 @@ export default function DashboardPage() {
           Network traffic overview and analysis
         </p>
       </div>
+
+      <AgentsPanel />
 
       <StatsRow
         totalPackets={summary.total_packets || 0}

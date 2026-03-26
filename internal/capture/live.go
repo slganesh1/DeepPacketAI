@@ -1,6 +1,7 @@
 package capture
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,7 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"DeepPacketAI/internal/ai"
+	"DeepPacketAI/internal/alerting"
 	"DeepPacketAI/internal/analysis"
+	"DeepPacketAI/internal/geoip"
 	"DeepPacketAI/internal/correlation"
 	"DeepPacketAI/internal/detection"
 	"DeepPacketAI/internal/domain"
@@ -36,12 +40,15 @@ import (
 
 // Engine manages live packet capture sessions.
 type Engine struct {
-	hub      *ws.Hub
-	db       storage.Store
-	sessions map[string]*Session
-	mu       sync.RWMutex
-	cfg      CaptureConfig
-	factory  CaptureSourceFactory
+	hub         *ws.Hub
+	db          storage.Store
+	sessions    map[string]*Session
+	mu          sync.RWMutex
+	cfg         CaptureConfig
+	factory     CaptureSourceFactory
+	aiRegistry  *ai.ProviderRegistry  // optional: set via SetAIRegistry
+	dispatcher  *alerting.Dispatcher  // optional: set via SetDispatcher
+	geoEnricher *geoip.Enricher       // optional: set via SetGeoEnricher
 }
 
 // NewEngine creates a new capture engine.
@@ -54,6 +61,21 @@ func NewEngine(hub *ws.Hub, db storage.Store) *Engine {
 		cfg:      cfg,
 		factory:  selectFactory(cfg),
 	}
+}
+
+// SetAIRegistry attaches an AI provider registry for real-time capture analysis.
+func (e *Engine) SetAIRegistry(r *ai.ProviderRegistry) {
+	e.aiRegistry = r
+}
+
+// SetDispatcher attaches an alert dispatcher for post-capture notifications.
+func (e *Engine) SetDispatcher(d *alerting.Dispatcher) {
+	e.dispatcher = d
+}
+
+// SetGeoEnricher attaches a GeoIP enricher for IP reputation lookups after capture.
+func (e *Engine) SetGeoEnricher(g *geoip.Enricher) {
+	e.geoEnricher = g
 }
 
 // ListInterfaces returns available network interfaces.
@@ -343,11 +365,15 @@ func (e *Engine) statsLoop(session *Session, stats *Stats, sources []CaptureSour
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
+	var ticks int
+	var aiRunning int32 // atomic: 0=idle 1=running
+
 	for {
 		select {
 		case <-session.StopCh():
 			return
 		case <-ticker.C:
+			ticks++
 			stats.Tick()
 			snap := stats.Snapshot()
 
@@ -365,6 +391,7 @@ func (e *Engine) statsLoop(session *Session, stats *Stats, sources []CaptureSour
 			}
 
 			payload := map[string]any{
+				"session_id":      session.ID,
 				"total_packets":   snap.TotalPackets,
 				"total_bytes":     snap.TotalBytes,
 				"packets_per_sec": snap.PacketsPerSec,
@@ -392,6 +419,11 @@ func (e *Engine) statsLoop(session *Session, stats *Stats, sources []CaptureSour
 					BytesPerSec:        int(snap.BytesPerSec),
 					ProtocolCountsJSON: string(protoJSON),
 				}})
+			}
+
+			// Real-time AI analysis every 30 seconds
+			if ticks%realtimeAnalysisInterval == 0 {
+				go e.realtimeAnalysis(session, stats, ticks, &aiRunning)
 			}
 		}
 	}
@@ -430,8 +462,12 @@ func (e *Engine) analyzeAndStore(session *Session) {
 	}
 	log.Printf("session %s: %d flows from workers", session.ID, len(flows))
 
-	// 2. Run detection engine
-	detector := detection.NewEngine()
+	// 2. Run detection engine (built-in + user-defined rules)
+	rules := detection.BuiltinRules()
+	if e.db != nil {
+		rules = append(rules, detection.LoadUserRules(e.db)...)
+	}
+	detector := detection.NewEngineWithRules(rules)
 	alerts := detector.RunOnFlows(flows)
 	if len(alerts) > 0 {
 		log.Printf("capture session %s: %d detection alerts", session.ID, len(alerts))
@@ -450,6 +486,10 @@ func (e *Engine) analyzeAndStore(session *Session) {
 		}
 		if err := e.db.StoreEvents(eventRecords); err != nil {
 			log.Printf("warning: failed to store events for session %s: %v", session.ID, err)
+		}
+		// Fire alert notifications asynchronously
+		if e.dispatcher != nil {
+			go e.dispatcher.Dispatch(context.Background(), eventRecords)
 		}
 	}
 
@@ -514,6 +554,23 @@ func (e *Engine) analyzeAndStore(session *Session) {
 
 	session.SetStatus("completed")
 	log.Printf("capture session %s analysis complete: %d flows, %d calls", session.ID, len(flows), len(calls))
+
+	// 10. GeoIP enrichment (async)
+	if e.geoEnricher != nil {
+		var ips []string
+		seen := make(map[string]struct{})
+		for _, f := range flows {
+			for _, ip := range []string{f.SrcIP, f.DstIP} {
+				if ip != "" {
+					if _, ok := seen[ip]; !ok {
+						seen[ip] = struct{}{}
+						ips = append(ips, ip)
+					}
+				}
+			}
+		}
+		go e.geoEnricher.EnrichIPs(context.Background(), ips)
+	}
 
 	e.hub.Broadcast(ws.Message{
 		Type: ws.MsgCaptureState,

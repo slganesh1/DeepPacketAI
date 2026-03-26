@@ -7,7 +7,9 @@ import (
 	"net/http"
 
 	"DeepPacketAI/internal/ai"
+	"DeepPacketAI/internal/alerting"
 	"DeepPacketAI/internal/capture"
+	"DeepPacketAI/internal/geoip"
 	"DeepPacketAI/internal/storage"
 	"DeepPacketAI/internal/ws"
 )
@@ -19,6 +21,8 @@ type Config struct {
 	Hub           *ws.Hub
 	CaptureEngine *capture.Engine
 	AIRegistry    *ai.ProviderRegistry
+	Dispatcher    *alerting.Dispatcher
+	GeoEnricher   *geoip.Enricher
 	// UIAssets is the embedded React production build. If nil, no UI is served.
 	UIAssets fs.FS
 	// UploadsDir is the directory where uploaded PCAP files are stored.
@@ -32,6 +36,8 @@ type Server struct {
 	hub           *ws.Hub
 	captureEngine *capture.Engine
 	aiRegistry    *ai.ProviderRegistry
+	dispatcher    *alerting.Dispatcher
+	geoEnricher   *geoip.Enricher
 	uiAssets      fs.FS
 	uploadsDir    string
 }
@@ -44,6 +50,8 @@ func NewServer(cfg Config) *Server {
 		hub:           cfg.Hub,
 		captureEngine: cfg.CaptureEngine,
 		aiRegistry:    cfg.AIRegistry,
+		dispatcher:    cfg.Dispatcher,
+		geoEnricher:   cfg.GeoEnricher,
 		uiAssets:      cfg.UIAssets,
 		uploadsDir:    cfg.UploadsDir,
 	}
@@ -51,7 +59,7 @@ func NewServer(cfg Config) *Server {
 
 // Start starts the HTTP server (BLOCKING)
 func (s *Server) Start(ctx context.Context) error {
-	router := NewRouter(s.db, s.hub, s.captureEngine, s.aiRegistry, s.uiAssets, s.uploadsDir)
+	router := NewRouter(s.db, s.hub, s.captureEngine, s.aiRegistry, s.dispatcher, s.geoEnricher, s.uiAssets, s.uploadsDir)
 
 	log.Printf("API server listening on %s", s.addr)
 

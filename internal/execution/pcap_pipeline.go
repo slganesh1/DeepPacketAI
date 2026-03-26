@@ -22,7 +22,8 @@ func NewPipeline(factory pipeline.DecoderFactory) *Pipeline {
 
 // Run reads a PCAP file and decodes packets in parallel using a worker pool.
 // Flow-affinity routing ensures all packets of the same flow go to the same worker.
-func (p *Pipeline) Run(pcapPath string) ([]domain.Flow, []*domain.Packet, error) {
+// The third return value is the raw packet count read from the file (before any filtering).
+func (p *Pipeline) Run(pcapPath string) ([]domain.Flow, []*domain.Packet, int64, error) {
 	pool := pipeline.NewPool(0, 4096, p.factory)
 
 	var mu sync.Mutex
@@ -54,5 +55,5 @@ func (p *Pipeline) Run(pcapPath string) ([]domain.Flow, []*domain.Packet, error)
 		metrics.FlowsTotal.WithLabelValues("pcap", string(f.Type)).Inc()
 	}
 
-	return flows, packets, err
+	return flows, packets, pcapCount, err
 }

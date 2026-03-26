@@ -14,6 +14,8 @@ import type { NetworkInterface, StopCaptureResponse } from "../api/capture";
 import { useWebSocket } from "../hooks/useWebSocket";
 import type { WSMessage } from "../hooks/useWebSocket";
 import LiveIndicator from "../components/dashboard/LiveIndicator";
+import LiveInsightsFeed from "../components/LiveInsightsFeed";
+import type { AIInsight } from "../components/LiveInsightsFeed";
 
 interface PacketError {
   Code: string;
@@ -64,6 +66,8 @@ export default function CapturePage() {
   const [error, setError] = useState<string | null>(null);
   const [jobId, setJobId] = useState<number | null>(null);
   const [sessionStatus, setSessionStatus] = useState<string | null>(null);
+  const [insights, setInsights] = useState<AIInsight[]>([]);
+  const [aiAnalyzing, setAIAnalyzing] = useState(false);
 
   useEffect(() => {
     fetchInterfaces()
@@ -83,10 +87,14 @@ export default function CapturePage() {
       setSessionStatus(p.status);
       if (p.status === "stopped") {
         setCapturing(false);
+        setAIAnalyzing(false);
       }
       if (p.job_id) {
         setJobId(p.job_id);
       }
+    } else if (msg.type === "ai_insight") {
+      setAIAnalyzing(false);
+      setInsights((prev) => [...prev, msg.payload as AIInsight].slice(-50));
     }
   }, []);
 
@@ -101,10 +109,14 @@ export default function CapturePage() {
       setError(null);
       setRecentPackets([]);
       setAlerts([]);
+      setInsights([]);
+      setAIAnalyzing(false);
       setSelectedPacket(null);
       setJobId(null);
       setSessionStatus(null);
       const result = await startCapture(selectedIface, bpfFilter);
+      // Show "Analyzing…" spinner 5s before the first AI insight arrives (~30s mark)
+      setTimeout(() => setAIAnalyzing(true), 25000);
       setSessionId(result.session_id);
       setJobId(result.job_id);
       setCapturing(true);
@@ -312,6 +324,11 @@ export default function CapturePage() {
           </div>
         )}
       </div>
+
+      {/* AI Live Insights — shown during capture and after */}
+      {(capturing || insights.length > 0) && (
+        <LiveInsightsFeed insights={insights} analyzing={aiAnalyzing && insights.length === 0} />
+      )}
 
       {/* Post-capture Navigation */}
       {!capturing && jobId && sessionStatus === "completed" && (

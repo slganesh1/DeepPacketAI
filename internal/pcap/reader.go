@@ -52,9 +52,8 @@ func ReadPCAP(pcapPath string, handler PacketHandler) error {
 		frameNum++
 
 		net := packet.NetworkLayer()
-		tr := packet.TransportLayer()
-		if net == nil || tr == nil {
-			continue
+		if net == nil {
+			continue // non-IP (ARP, etc.)
 		}
 
 		var srcIP, dstIP string
@@ -75,30 +74,51 @@ func ReadPCAP(pcapPath string, handler PacketHandler) error {
 		var tcpSeq, tcpAck uint32
 		var tcpFlags uint16
 
-		switch t := tr.(type) {
-		case *layers.TCP:
-			srcPort = uint16(t.SrcPort)
-			dstPort = uint16(t.DstPort)
-			proto = "TCP"
-			payload = t.LayerPayload()
-			tcpSeq = t.Seq
-			tcpAck = t.Ack
-			tcpFlags = tcpFlagsFromLayer(t)
-		case *layers.UDP:
-			srcPort = uint16(t.SrcPort)
-			dstPort = uint16(t.DstPort)
-			proto = "UDP"
-			payload = t.LayerPayload()
-		default:
-			// Check for SCTP
-			if sctp := packet.Layer(layers.LayerTypeSCTP); sctp != nil {
-				sctpLayer := sctp.(*layers.SCTP)
-				srcPort = uint16(sctpLayer.SrcPort)
-				dstPort = uint16(sctpLayer.DstPort)
-				proto = "SCTP"
-				payload = sctpLayer.LayerPayload()
+		tr := packet.TransportLayer()
+		if tr != nil {
+			switch t := tr.(type) {
+			case *layers.TCP:
+				srcPort = uint16(t.SrcPort)
+				dstPort = uint16(t.DstPort)
+				proto = "TCP"
+				payload = t.LayerPayload()
+				tcpSeq = t.Seq
+				tcpAck = t.Ack
+				tcpFlags = tcpFlagsFromLayer(t)
+			case *layers.UDP:
+				srcPort = uint16(t.SrcPort)
+				dstPort = uint16(t.DstPort)
+				proto = "UDP"
+				payload = t.LayerPayload()
+			default:
+				// Check for SCTP (gopacket may not surface it as TransportLayer)
+				if sctp := packet.Layer(layers.LayerTypeSCTP); sctp != nil {
+					sctpLayer := sctp.(*layers.SCTP)
+					srcPort = uint16(sctpLayer.SrcPort)
+					dstPort = uint16(sctpLayer.DstPort)
+					proto = "SCTP"
+					payload = sctpLayer.LayerPayload()
+				} else {
+					continue
+				}
+			}
+		} else {
+			// No transport layer — handle ICMP/ICMPv6 (gopacket does not classify
+			// these as transport; they sit directly above the network layer).
+			if l := packet.Layer(layers.LayerTypeICMPv4); l != nil {
+				t := l.(*layers.ICMPv4)
+				proto = "ICMP"
+				srcPort = uint16(t.TypeCode >> 8)   // ICMP type
+				dstPort = uint16(t.TypeCode & 0xFF) // ICMP code
+				payload = t.LayerPayload()
+			} else if l := packet.Layer(layers.LayerTypeICMPv6); l != nil {
+				t := l.(*layers.ICMPv6)
+				proto = "ICMPv6"
+				srcPort = uint16(t.TypeCode >> 8)
+				dstPort = uint16(t.TypeCode & 0xFF)
+				payload = t.LayerPayload()
 			} else {
-				continue
+				continue // other non-TCP/UDP/SCTP/ICMP (OSPF, IGMP, etc.) — skip
 			}
 		}
 

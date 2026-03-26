@@ -12,8 +12,10 @@ import (
 	"time"
 
 	"DeepPacketAI/internal/ai"
+	"DeepPacketAI/internal/alerting"
 	"DeepPacketAI/internal/capture"
 	"DeepPacketAI/internal/execution"
+	"DeepPacketAI/internal/geoip"
 	"DeepPacketAI/internal/storage"
 	_ "DeepPacketAI/internal/storage/postgres"
 	"DeepPacketAI/internal/web"
@@ -22,14 +24,39 @@ import (
 )
 
 func main() {
+	// ---- Load .env file (before anything else so flags/config can use the vars) ----
+	loadDotEnv()
+
 	// ---- Flags ----
 	pcapFile   := flag.String("pcap", "", "PCAP file to analyze")
 	serverOnly := flag.Bool("server", false, "Start API server (default when no -pcap flag)")
 	noBrowser  := flag.Bool("no-browser", false, "Do not open browser on startup")
+
+	// Distributed mode flags
+	mode           := flag.String("mode", "standalone", "Operation mode: standalone | agent | central")
+	centralAddr    := flag.String("central", "", "Central node address for agent mode (host:port, e.g. 192.168.1.10:9090)")
+	agentID        := flag.String("agent-id", "", "Agent identifier (default: hostname-iface)")
+	iface          := flag.String("iface", "", "Network interface for agent mode capture")
+	bpfFilter      := flag.String("filter", "", "BPF filter expression for agent mode (e.g. 'port 5060')")
+	streamPort     := flag.String("stream-port", ":9090", "TCP port for central to receive agent streams")
+	listIfaces     := flag.Bool("list-interfaces", false, "List available network interfaces and exit")
+
 	flag.Parse()
 
+	// ---- List interfaces and exit (useful for finding Windows device names) ----
+	if *listIfaces {
+		listInterfaces()
+		return
+	}
+
+	// ---- Agent mode: capture-only, no UI, no DB ----
+	if *mode == "agent" {
+		runAgent(*iface, *bpfFilter, *centralAddr, *agentID)
+		return
+	}
+
 	// Default: start server if no PCAP file provided, or alongside PCAP analysis
-	startServer := *serverOnly || *pcapFile == ""
+	startServer := *serverOnly || *pcapFile == "" || *mode == "central"
 
 	// ---- App data directory (%APPDATA%\DeepPacketAI on Windows) ----
 	appDataDir := appDataPath("DeepPacketAI")
@@ -66,9 +93,15 @@ func main() {
 	// ---- Initialize AI provider registry ----
 	aiRegistry := ai.NewProviderRegistry()
 
+	// ---- Initialize alert dispatcher ----
+	alertDispatcher := alerting.New(db)
+
+	// ---- Initialize GeoIP enricher ----
+	geoEnricher := geoip.New(db)
+
 	// ---- Run PCAP analysis if requested ----
 	if *pcapFile != "" {
-		exec := execution.NewExecutor(db).WithAIRegistry(aiRegistry)
+		exec := execution.NewExecutor(db).WithAIRegistry(aiRegistry).WithDispatcher(alertDispatcher).WithGeoEnricher(geoEnricher)
 		if err := exec.RunPCAP(*pcapFile); err != nil {
 			log.Fatalf("pcap analysis failed: %v", err)
 		}
@@ -85,6 +118,14 @@ func main() {
 
 		// Initialize capture engine
 		captureEngine := capture.NewEngine(hub, db)
+		captureEngine.SetAIRegistry(aiRegistry)
+		captureEngine.SetDispatcher(alertDispatcher)
+		captureEngine.SetGeoEnricher(geoEnricher)
+
+		// Central mode: start TCP receiver for agent streams
+		if *mode == "central" {
+			startCentralReceiver(*streamPort, captureEngine)
+		}
 
 		providers := aiRegistry.List()
 		if len(providers) > 0 {
@@ -112,6 +153,8 @@ func main() {
 			Hub:           hub,
 			CaptureEngine: captureEngine,
 			AIRegistry:    aiRegistry,
+			Dispatcher:    alertDispatcher,
+			GeoEnricher:   geoEnricher,
 			UIAssets:      uiFS,
 			UploadsDir:    uploadsDir,
 		})

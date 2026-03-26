@@ -197,6 +197,58 @@ var migrations = []migration{
         CREATE INDEX IF NOT EXISTS idx_chat_messages_conversation ON chat_messages(conversation_id);
         `,
 	},
+	{
+		version: 2,
+		sql: `
+        CREATE TABLE IF NOT EXISTS alert_targets (
+            id          BIGSERIAL PRIMARY KEY,
+            name        TEXT NOT NULL,
+            type        TEXT NOT NULL CHECK(type IN ('slack','webhook','email')),
+            url         TEXT NOT NULL DEFAULT '',
+            config_json TEXT NOT NULL DEFAULT '{}',
+            enabled     BOOLEAN NOT NULL DEFAULT TRUE,
+            min_severity TEXT NOT NULL DEFAULT 'warning' CHECK(min_severity IN ('info','warning','critical')),
+            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        `,
+	},
+	{
+		version: 3,
+		sql: `
+        CREATE TABLE IF NOT EXISTS user_detection_rules (
+            id             BIGSERIAL PRIMARY KEY,
+            name           TEXT NOT NULL,
+            description    TEXT NOT NULL DEFAULT '',
+            protocol       TEXT NOT NULL DEFAULT 'ANY',
+            severity       TEXT NOT NULL DEFAULT 'warning' CHECK(severity IN ('info','warning','error','critical')),
+            condition_json TEXT NOT NULL DEFAULT '{}',
+            enabled        BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        `,
+	},
+	{
+		version: 4,
+		sql: `
+        CREATE TABLE IF NOT EXISTS ip_enrichments (
+            ip           TEXT PRIMARY KEY,
+            country_code TEXT NOT NULL DEFAULT '',
+            country      TEXT NOT NULL DEFAULT '',
+            city         TEXT NOT NULL DEFAULT '',
+            isp          TEXT NOT NULL DEFAULT '',
+            org          TEXT NOT NULL DEFAULT '',
+            lat          DOUBLE PRECISION NOT NULL DEFAULT 0,
+            lon          DOUBLE PRECISION NOT NULL DEFAULT 0,
+            is_hosting   BOOLEAN NOT NULL DEFAULT FALSE,
+            is_tor       BOOLEAN NOT NULL DEFAULT FALSE,
+            is_proxy     BOOLEAN NOT NULL DEFAULT FALSE,
+            abuse_score  INTEGER NOT NULL DEFAULT 0,
+            is_abusive   BOOLEAN NOT NULL DEFAULT FALSE,
+            last_checked TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_ip_enrichments_country ON ip_enrichments(country_code);
+        `,
+	},
 }
 
 func (s *PostgresStore) runMigrations(ctx context.Context) error {

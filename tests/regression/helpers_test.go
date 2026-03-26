@@ -143,7 +143,7 @@ func equalStringSlice(a, b []string) bool {
 func runPipeline(t *testing.T, pcapPath string) Snapshot {
 	t.Helper()
 	pipe := execution.NewPipeline(execution.BuiltinDecoderFactory)
-	flows, _, err := pipe.Run(pcapPath)
+	flows, _, _, err := pipe.Run(pcapPath)
 	if err != nil {
 		t.Fatalf("pipeline error: %v", err)
 	}

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 
 export interface WSMessage {
-  type: "packet" | "stats" | "alert" | "capture_state" | "chat_chunk";
+  type: "packet" | "stats" | "alert" | "capture_state" | "chat_chunk" | "ai_insight";
   payload: any;
 }
 

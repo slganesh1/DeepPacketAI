@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"DeepPacketAI/internal/ai"
+	"DeepPacketAI/internal/alerting"
 	"DeepPacketAI/internal/analysis"
 	"DeepPacketAI/internal/correlation"
 	"DeepPacketAI/internal/detection"
+	"DeepPacketAI/internal/geoip"
 	"DeepPacketAI/internal/domain"
 	"DeepPacketAI/internal/flowengine"
 	"DeepPacketAI/internal/metrics"
@@ -31,7 +33,9 @@ import (
 
 type Executor struct {
 	db           storage.Store
-	aiRegistry   *ai.ProviderRegistry   // optional; nil = no AI analysis
+	aiRegistry   *ai.ProviderRegistry      // optional; nil = no AI analysis
+	dispatcher   *alerting.Dispatcher      // optional; nil = no notifications
+	geoEnricher  *geoip.Enricher           // optional; nil = no geo enrichment
 	protocolReg  *plugin.ProtocolRegistry  // optional; nil = use built-in factory
 	detectionReg *plugin.DetectionRegistry // optional; nil = use BuiltinRules
 }
@@ -43,6 +47,18 @@ func NewExecutor(db storage.Store) *Executor {
 // WithAIRegistry attaches an AI provider registry to enable LLM-based analysis.
 func (e *Executor) WithAIRegistry(r *ai.ProviderRegistry) *Executor {
 	e.aiRegistry = r
+	return e
+}
+
+// WithDispatcher attaches an alert dispatcher to send notifications after detection.
+func (e *Executor) WithDispatcher(d *alerting.Dispatcher) *Executor {
+	e.dispatcher = d
+	return e
+}
+
+// WithGeoEnricher attaches a GeoIP enricher for IP reputation lookups after analysis.
+func (e *Executor) WithGeoEnricher(g *geoip.Enricher) *Executor {
+	e.geoEnricher = g
 	return e
 }
 
@@ -103,7 +119,7 @@ func (e *Executor) runPCAP(jobID int64, pcapPath string) error {
 
 	pipeline := NewPipeline(factory)
 
-	flows, packets, err := pipeline.Run(pcapPath)
+	flows, packets, pcapCount, err := pipeline.Run(pcapPath)
 	log.Println("---- Decoded Flows ----")
 	for _, f := range flows {
 		log.Printf(
@@ -126,9 +142,10 @@ func (e *Executor) runPCAP(jobID int64, pcapPath string) error {
 		return err
 	}
 
-	// Guard: if no TCP/UDP/SCTP packets were extracted, the PCAP contains only
-	// unsupported traffic (e.g. pure ICMP, ARP, or non-IP frames).
-	if len(packets) == 0 {
+	// Guard: only fail on a truly empty file. If the raw PCAP contained packets
+	// but none decoded (e.g. pure ARP or non-IP), complete with 0 flows rather
+	// than failing — ICMP/ICMPv6 packets are now decoded by reader.go.
+	if pcapCount == 0 {
 		msg := "no supported traffic found: PCAP contains no TCP/UDP/SCTP over IPv4/IPv6 " +
 			"(pure ICMP, ARP, or non-IP captures are not analysed)"
 		metrics.PCAPJobsTotal.WithLabelValues("failed").Inc()
@@ -139,12 +156,15 @@ func (e *Executor) runPCAP(jobID int64, pcapPath string) error {
 	metrics.PCAPJobsTotal.WithLabelValues("completed").Inc()
 
 	// ── Rule-based detection ──────────────────────────────────────────────────
-	var detector *detection.Engine
+	var baseRules []detection.Rule
 	if e.detectionReg != nil {
-		detector = detection.NewEngineWithRules(e.detectionReg.ActiveRules())
+		baseRules = e.detectionReg.ActiveRules()
 	} else {
-		detector = detection.NewEngine()
+		baseRules = detection.BuiltinRules()
 	}
+	// Append enabled user-defined rules from DB
+	baseRules = append(baseRules, detection.LoadUserRules(e.db)...)
+	detector := detection.NewEngineWithRules(baseRules)
 	alerts := detector.RunOnFlows(flows)
 	if len(alerts) > 0 {
 		log.Printf("---- Detection: %d alerts found ----", len(alerts))
@@ -162,6 +182,10 @@ func (e *Executor) runPCAP(jobID int64, pcapPath string) error {
 		}
 		if err := e.db.StoreEvents(eventRecords); err != nil {
 			log.Printf("warning: failed to store events: %v", err)
+		}
+		// Fire alert notifications asynchronously
+		if e.dispatcher != nil {
+			go e.dispatcher.Dispatch(context.Background(), eventRecords)
 		}
 	}
 
@@ -360,5 +384,26 @@ func (e *Executor) runPCAP(jobID int64, pcapPath string) error {
 		}
 	}
 
-	return e.db.CompleteJob(jobID)
+	if err := e.db.CompleteJob(jobID); err != nil {
+		return err
+	}
+
+	// ── GeoIP enrichment (async — does not block job completion) ─────────────
+	if e.geoEnricher != nil {
+		var ips []string
+		seen := make(map[string]struct{})
+		for _, f := range flows {
+			for _, ip := range []string{f.SrcIP, f.DstIP} {
+				if ip != "" {
+					if _, ok := seen[ip]; !ok {
+						seen[ip] = struct{}{}
+						ips = append(ips, ip)
+					}
+				}
+			}
+		}
+		go e.geoEnricher.EnrichIPs(context.Background(), ips)
+	}
+
+	return nil
 }

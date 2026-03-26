@@ -67,6 +67,27 @@ type Store interface {
 	GetProtocolCounts(jobID *int64) ([]map[string]any, error)
 	GetTopTalkers(jobID *int64, limit int) ([]map[string]any, error)
 
+	// GeoIP / IP reputation enrichment
+	UpsertIPEnrichment(e IPEnrichment) error
+	GetIPEnrichment(ip string) (*IPEnrichment, error)
+	BulkGetIPEnrichments(ips []string) (map[string]IPEnrichment, error)
+	GetGeoSummary(limit int) ([]GeoSummaryRow, error)
+	GetFlaggedIPs(limit int) ([]IPEnrichment, error)
+
+	// User-defined detection rules
+	CreateUserRule(r UserDetectionRule) (int64, error)
+	UpdateUserRule(r UserDetectionRule) error
+	DeleteUserRule(id int64) error
+	GetUserRule(id int64) (*UserDetectionRule, error)
+	ListUserRules() ([]UserDetectionRule, error)
+
+	// Alert targets (webhook/Slack/email notification rules)
+	CreateAlertTarget(t AlertTarget) (int64, error)
+	UpdateAlertTarget(t AlertTarget) error
+	DeleteAlertTarget(id int64) error
+	GetAlertTarget(id int64) (*AlertTarget, error)
+	ListAlertTargets() ([]AlertTarget, error)
+
 	// Chat
 	CreateConversation(conv Conversation) error
 	ListConversations() ([]Conversation, error)

@@ -27,7 +27,7 @@ func TestUnsupportedPCAP_ICMP(t *testing.T) {
 	pcap := writeTempPCAP(t, frames)
 
 	pipe := execution.NewPipeline(execution.BuiltinDecoderFactory)
-	flows, packets, err := pipe.Run(pcap)
+	flows, packets, _, err := pipe.Run(pcap)
 
 	if err != nil {
 		t.Fatalf("pipeline returned unexpected error: %v", err)
@@ -53,7 +53,7 @@ func TestUnsupportedPCAP_EmptyFile(t *testing.T) {
 	pcap := writeTempPCAP(t, nil) // write pcap header only, no packets
 
 	pipe := execution.NewPipeline(execution.BuiltinDecoderFactory)
-	flows, packets, err := pipe.Run(pcap)
+	flows, packets, _, err := pipe.Run(pcap)
 
 	if err != nil {
 		t.Fatalf("unexpected error on empty pcap: %v", err)
@@ -91,7 +91,7 @@ func TestUnsupportedPCAP_UnknownAppProtocol(t *testing.T) {
 	pcap := writeTempPCAP(t, frames)
 
 	pipe := execution.NewPipeline(execution.BuiltinDecoderFactory)
-	flows, packets, err := pipe.Run(pcap)
+	flows, packets, _, err := pipe.Run(pcap)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
