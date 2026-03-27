@@ -64,7 +64,7 @@ func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiR
 	alertTargetHandler := handlers.NewAlertTargetHandler(db, dispatcher)
 	detectionRulesHandler := handlers.NewDetectionRulesHandler(db)
 	geoHandler := handlers.NewGeoHandler(db, geoEnricher)
-	pluginHandler := handlers.NewPluginHandler()
+	pluginHandler := handlers.NewPluginHandler(aiRegistry)
 	reportHandler := handlers.NewReportHandler(db)
 	authHandler := handlers.NewAuthHandler()
 

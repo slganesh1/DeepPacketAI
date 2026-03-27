@@ -3,17 +3,22 @@ package handlers
 import (
 	"net/http"
 
+	"DeepPacketAI/internal/ai"
 	"DeepPacketAI/internal/plugin"
 
 	"github.com/go-chi/chi/v5"
 )
 
 // PluginHandler serves the plugin management REST API.
-type PluginHandler struct{}
+type PluginHandler struct {
+	aiRegistry *ai.ProviderRegistry
+}
 
 // NewPluginHandler creates a PluginHandler backed by the global plugin registries.
-func NewPluginHandler() *PluginHandler {
-	return &PluginHandler{}
+// aiRegistry is the same registry used by the chat handler — activating an AI plugin
+// here also updates the active provider for chat/analysis.
+func NewPluginHandler(aiRegistry *ai.ProviderRegistry) *PluginHandler {
+	return &PluginHandler{aiRegistry: aiRegistry}
 }
 
 // GetAll returns every registered plugin grouped by category.
@@ -95,6 +100,10 @@ func (h *PluginHandler) ActivateAI(w http.ResponseWriter, r *http.Request) {
 	if err := plugin.AI.Activate(name); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
+	}
+	// Also update the ai.ProviderRegistry used by chat/analysis handlers.
+	if h.aiRegistry != nil {
+		h.aiRegistry.SetActive(name)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "activated", "name": name})
 }
