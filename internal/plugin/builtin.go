@@ -11,6 +11,8 @@ import (
 	"DeepPacketAI/internal/protocols/dns"
 	"DeepPacketAI/internal/protocols/gtp"
 	"DeepPacketAI/internal/protocols/http1"
+	"DeepPacketAI/internal/protocols/http2"
+	"DeepPacketAI/internal/protocols/nas5g"
 	"DeepPacketAI/internal/protocols/ngap"
 	"DeepPacketAI/internal/protocols/pfcp"
 	"DeepPacketAI/internal/protocols/rtp"
@@ -216,6 +218,40 @@ func registerProtocolPlugins() {
 		},
 	})
 
+	RegisterProtocol(&ProtocolPlugin{
+		Manifest: Manifest{
+			Name:        "http2",
+			Version:     "1.0.0",
+			Author:      "builtin",
+			Description: "HTTP/2 decoder — 5G SBI (Service Based Interface) API calls between NFs",
+			Category:    CategoryProtocol,
+			Tags:        []string{"http2", "sbi", "5g", "nf", "rest", "telecom"},
+			Protocols:   []string{"HTTP2", "SBI"},
+			Ports:       []int{80, 443, 8080, 8443, 7777},
+		},
+		Enabled: true,
+		NewDecoder: func() protocols.Decoder {
+			return http2.NewDecoder()
+		},
+	})
+
+	RegisterProtocol(&ProtocolPlugin{
+		Manifest: Manifest{
+			Name:        "nas5g",
+			Version:     "1.0.0",
+			Author:      "builtin",
+			Description: "NAS-5GS decoder — 5G Non-Access Stratum mobility and session management (3GPP TS 24.501)",
+			Category:    CategoryProtocol,
+			Tags:        []string{"nas", "5g", "ue", "amf", "registration", "telecom"},
+			Protocols:   []string{"NAS5G"},
+			Ports:       []int{38412},
+		},
+		Enabled: true,
+		NewDecoder: func() protocols.Decoder {
+			return nas5g.NewDecoder()
+		},
+	})
+
 	// flowengine tracker must be LAST — it catches all unmatched flows
 	RegisterProtocol(&ProtocolPlugin{
 		Manifest: Manifest{
@@ -238,7 +274,7 @@ func registerProtocolPlugins() {
 // ─── Detection rule plugins ──────────────────────────────────────────────────
 
 func registerDetectionPlugins() {
-	allRules := detection.BuiltinRules()
+	allRules := append(detection.BuiltinRules(), detection.Builtin5GCRules()...)
 
 	// Metadata for each rule keyed by rule name
 	type ruleMeta struct {
@@ -283,6 +319,13 @@ func registerDetectionPlugins() {
 		"TLS Weak Cipher":                {[]string{"tls", "cipher", "security"}, "error", "1.0.0"},
 		"TLS JA3 Fingerprint":            {[]string{"tls", "ja3", "fingerprint", "security"}, "warning", "1.0.0"},
 		"TLS Self-Signed Certificate":    {[]string{"tls", "certificate", "security"}, "warning", "1.0.0"},
+		// 5GC rules
+		"NAS Auth Failure Storm":     {[]string{"nas5g", "5g", "auth", "security"}, "critical", "1.0.0"},
+		"PDU Session Flood":          {[]string{"nas5g", "5g", "pdu", "flood"}, "warning", "1.0.0"},
+		"PFCP Session Anomaly":       {[]string{"pfcp", "5g", "upf", "anomaly"}, "warning", "1.0.0"},
+		"SBI Error Rate":             {[]string{"http2", "sbi", "5g", "errors"}, "warning", "1.0.0"},
+		"GTP-U Tunnel Flood":         {[]string{"gtp", "5g", "tunnel", "flood"}, "warning", "1.0.0"},
+		"NF Registration Storm":      {[]string{"nrf", "5g", "sbi", "flood"}, "warning", "1.0.0"},
 	}
 
 	for _, rule := range allRules {

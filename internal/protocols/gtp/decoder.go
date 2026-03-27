@@ -3,6 +3,7 @@ package gtp
 import (
 	"encoding/binary"
 	"fmt"
+	"net"
 
 	"DeepPacketAI/internal/domain"
 	"DeepPacketAI/internal/dpi"
@@ -13,26 +14,34 @@ import (
 type Decoder struct {
 	transactions map[uint16]*gtpTransaction
 	completed    []*gtpTransaction
+	tunnelCount  int
 }
 
 type gtpTransaction struct {
-	ID         string
-	TEID       uint32
-	MsgType    string
-	SrcIP      string
-	DstIP      string
-	SrcPort    uint16
-	DstPort    uint16
-	CauseCode  uint8
-	SeqNo      uint16
-	IsGTPU     bool
-	HasReply   bool
-	IsError    bool
-	Timestamp  interface{}
-	IMSI       string
-	MSISDN     string
-	APN        string
-	IEs        *GTPv2IESet // Full parsed IEs for GTPv2-C
+	ID               string
+	TEID             uint32
+	MsgType          string
+	SrcIP            string
+	DstIP            string
+	SrcPort          uint16
+	DstPort          uint16
+	CauseCode        uint8
+	SeqNo            uint16
+	IsGTPU           bool
+	HasReply         bool
+	IsError          bool
+	Timestamp        interface{}
+	IMSI             string
+	MSISDN           string
+	APN              string
+	IEs              *GTPv2IESet // Full parsed IEs for GTPv2-C
+	// Inner packet fields (GTP-U only)
+	InnerSrcIP       string
+	InnerDstIP       string
+	InnerProtocol    string
+	InnerSrcPort     uint16
+	InnerDstPort     uint16
+	InnerPacketCount int
 }
 
 func NewDecoder() *Decoder {
@@ -115,6 +124,22 @@ func (d *Decoder) HandlePacketLive(pkt *domain.Packet) *protocols.DecodedPacket 
 				metadata["apn"] = lastTx.APN
 			}
 		}
+
+		// Add inner packet info for GTP-U
+		if lastTx.IsGTPU {
+			if lastTx.InnerSrcIP != "" {
+				metadata["inner_src_ip"] = lastTx.InnerSrcIP
+				metadata["inner_dst_ip"] = lastTx.InnerDstIP
+				metadata["inner_protocol"] = lastTx.InnerProtocol
+				summary += fmt.Sprintf(" Inner:%s->%s(%s)", lastTx.InnerSrcIP, lastTx.InnerDstIP, lastTx.InnerProtocol)
+			}
+			if lastTx.InnerSrcPort != 0 {
+				metadata["inner_src_port"] = lastTx.InnerSrcPort
+				metadata["inner_dst_port"] = lastTx.InnerDstPort
+			}
+			metadata["tunnel_count"] = d.tunnelCount
+			metadata["inner_packet_count"] = lastTx.InnerPacketCount
+		}
 	}
 
 	return &protocols.DecodedPacket{
@@ -131,6 +156,9 @@ func (d *Decoder) Flush() []domain.Flow {
 
 	for _, tx := range d.completed {
 		flowType := domain.FlowGTP
+		if tx.IsGTPU {
+			flowType = domain.FlowGTPU
+		}
 		metrics := map[string]any{
 			"message_type": tx.MsgType,
 			"teid":         tx.TEID,
@@ -155,6 +183,17 @@ func (d *Decoder) Flush() []domain.Flow {
 			if tx.APN != "" {
 				metrics["apn"] = tx.APN
 			}
+		}
+
+		// Add inner packet info for GTP-U
+		if tx.IsGTPU {
+			metrics["inner_src_ip"] = tx.InnerSrcIP
+			metrics["inner_dst_ip"] = tx.InnerDstIP
+			metrics["inner_protocol"] = tx.InnerProtocol
+			metrics["inner_src_port"] = tx.InnerSrcPort
+			metrics["inner_dst_port"] = tx.InnerDstPort
+			metrics["tunnel_count"] = d.tunnelCount
+			metrics["inner_packet_count"] = tx.InnerPacketCount
 		}
 
 		flows = append(flows, domain.Flow{
@@ -287,9 +326,115 @@ func (d *Decoder) parseGTP(pkt *domain.Packet) (*GTPHeader, uint8) {
 		IEs:       ies,
 	}
 
+	// Parse inner IP packet for GTP-U G-PDU (message type 0xFF)
+	if isGTPU && msgType == 0xFF && headerSize < len(payload) {
+		innerPayload := payload[headerSize:]
+		parseInnerPacket(innerPayload, tx)
+		if tx.InnerSrcIP != "" {
+			d.tunnelCount++
+			tx.InnerPacketCount = 1
+		}
+	}
+
 	d.completed = append(d.completed, tx)
 
 	return hdr, causeCode
+}
+
+// parseInnerPacket parses the inner IP packet encapsulated in a GTP-U G-PDU.
+func parseInnerPacket(data []byte, tx *gtpTransaction) {
+	if len(data) < 1 {
+		return
+	}
+
+	version := (data[0] >> 4) & 0x0F
+
+	switch version {
+	case 4: // IPv4
+		parseInnerIPv4(data, tx)
+	case 6: // IPv6
+		parseInnerIPv6(data, tx)
+	}
+}
+
+// parseInnerIPv4 parses the inner IPv4 packet.
+func parseInnerIPv4(data []byte, tx *gtpTransaction) {
+	if len(data) < 20 {
+		return
+	}
+
+	ihl := int(data[0]&0x0F) * 4
+	if ihl < 20 || ihl > len(data) {
+		return
+	}
+
+	tx.InnerSrcIP = net.IP(data[12:16]).String()
+	tx.InnerDstIP = net.IP(data[16:20]).String()
+
+	protocol := data[9]
+	tx.InnerProtocol = innerProtocolName(protocol)
+
+	if ihl < len(data) {
+		parseInnerTransport(protocol, data[ihl:], tx)
+	}
+}
+
+// parseInnerIPv6 parses the inner IPv6 packet.
+func parseInnerIPv6(data []byte, tx *gtpTransaction) {
+	if len(data) < 40 {
+		return
+	}
+
+	tx.InnerSrcIP = net.IP(data[8:24]).String()
+	tx.InnerDstIP = net.IP(data[24:40]).String()
+
+	nextHeader := data[6]
+	tx.InnerProtocol = innerProtocolName(nextHeader)
+
+	if len(data) > 40 {
+		parseInnerTransport(nextHeader, data[40:], tx)
+	}
+}
+
+// parseInnerTransport parses TCP/UDP/SCTP port information from the inner transport layer.
+func parseInnerTransport(protocol uint8, data []byte, tx *gtpTransaction) {
+	switch protocol {
+	case 6: // TCP
+		if len(data) >= 4 {
+			tx.InnerSrcPort = binary.BigEndian.Uint16(data[0:2])
+			tx.InnerDstPort = binary.BigEndian.Uint16(data[2:4])
+		}
+	case 17: // UDP
+		if len(data) >= 4 {
+			tx.InnerSrcPort = binary.BigEndian.Uint16(data[0:2])
+			tx.InnerDstPort = binary.BigEndian.Uint16(data[2:4])
+		}
+	case 132: // SCTP
+		if len(data) >= 4 {
+			tx.InnerSrcPort = binary.BigEndian.Uint16(data[0:2])
+			tx.InnerDstPort = binary.BigEndian.Uint16(data[2:4])
+		}
+	}
+}
+
+// innerProtocolName returns the protocol name for an IP protocol number.
+func innerProtocolName(proto uint8) string {
+	switch proto {
+	case 1:
+		return "ICMP"
+	case 6:
+		return "TCP"
+	case 17:
+		return "UDP"
+	case 41:
+		return "IPv6"
+	case 58:
+		return "ICMPv6"
+	case 132:
+		return "SCTP"
+	default:
+		return fmt.Sprintf("Proto_%d", proto)
+	}
 }
 
 func extractCauseCode(data []byte, version uint8) uint8 {

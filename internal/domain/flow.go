@@ -19,6 +19,10 @@ const (
 	FlowWebSocket FlowType = "WebSocket"
 	FlowTCP       FlowType = "TCP"
 	FlowUDP       FlowType = "UDP"
+	FlowHTTP2     FlowType = "HTTP2"
+	FlowSBI       FlowType = "SBI"   // 3GPP Service Based Interface
+	FlowNAS5G     FlowType = "NAS5G" // 5G NAS
+	FlowGTPU      FlowType = "GTPU"  // GTP-U with inner packet info
 )
 
 type Flow struct {
