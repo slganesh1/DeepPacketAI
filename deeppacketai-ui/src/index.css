@@ -4,7 +4,7 @@
 
 @layer base {
   html, body, #root {
-    @apply bg-slate-950;
+    @apply bg-slate-900;
     min-height: 100%;
   }
 }

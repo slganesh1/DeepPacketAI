@@ -9,7 +9,7 @@ interface Props {
 
 export default function AppLayout({ children, username, onLogout }: Props) {
   return (
-    <div className="flex h-screen bg-slate-950 text-gray-100">
+    <div className="flex h-screen bg-slate-900 text-gray-100">
       {/* Sidebar */}
       <Sidebar />
 
@@ -32,7 +32,7 @@ export default function AppLayout({ children, username, onLogout }: Props) {
         </div>
 
         {/* Page Content */}
-        <div className="flex-1 overflow-y-auto p-6 bg-slate-950">{children}</div>
+        <div className="flex-1 overflow-y-auto p-6 bg-slate-900">{children}</div>
       </div>
     </div>
   );
