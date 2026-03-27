@@ -110,12 +110,15 @@ func (h *ChatHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build LLM messages, re-attaching stored packet context to messages that had it
+	// Build LLM messages. Attach packet context only to the FIRST user message that
+	// had it — re-attaching on every message multiplies token usage with each turn.
 	var llmMessages []ai.Message
+	contextAttached := false
 	for _, m := range messages {
 		content := m.Content
-		if m.PacketContextJSON != "" {
-			content = "Context:\n" + m.PacketContextJSON + "\n\nQuestion:\n" + content
+		if m.PacketContextJSON != "" && !contextAttached {
+			content = "Network capture context:\n" + m.PacketContextJSON + "\n\nQuestion:\n" + content
+			contextAttached = true
 		}
 		llmMessages = append(llmMessages, ai.Message{
 			Role:    m.Role,

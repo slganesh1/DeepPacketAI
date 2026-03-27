@@ -14,6 +14,59 @@ import type { Conversation, ChatMessage } from "../api/chat";
 import { useWebSocket } from "../hooks/useWebSocket";
 import { api } from "../api/client";
 
+// Build a compact text summary of PCAP analysis results, safe for all AI token limits.
+// Replaces sending raw JSON flow objects which can easily exceed 200K tokens for large PCAPs.
+function buildPcapSummary(jobId: number, flows: any[], events: any[]): string {
+  const lines: string[] = [`=== PCAP Analysis Summary — Job #${jobId} ===`];
+
+  // Protocol distribution
+  const byType: Record<string, number> = {};
+  for (const f of flows) {
+    const t = f.type ?? f.protocol ?? "unknown";
+    byType[t] = (byType[t] ?? 0) + 1;
+  }
+  lines.push(`\nTotal flows: ${flows.length}`);
+  lines.push("Protocols: " + Object.entries(byType)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k}(${v})`).join(", "));
+
+  // Top source IPs
+  const srcCount: Record<string, number> = {};
+  const dstCount: Record<string, number> = {};
+  for (const f of flows) {
+    if (f.src_ip) srcCount[f.src_ip] = (srcCount[f.src_ip] ?? 0) + 1;
+    if (f.dst_ip) dstCount[f.dst_ip] = (dstCount[f.dst_ip] ?? 0) + 1;
+  }
+  const topSrc = Object.entries(srcCount).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const topDst = Object.entries(dstCount).sort((a, b) => b[1] - a[1]).slice(0, 8);
+  if (topSrc.length) lines.push("\nTop source IPs: " + topSrc.map(([ip, n]) => `${ip}(${n})`).join(", "));
+  if (topDst.length) lines.push("Top dest IPs:   " + topDst.map(([ip, n]) => `${ip}(${n})`).join(", "));
+
+  // Sample flows — 3 per protocol type, key metrics only
+  lines.push("\n=== Sample flows (3 per protocol) ===");
+  const seen: Record<string, number> = {};
+  for (const f of flows) {
+    const t = f.type ?? f.protocol ?? "unknown";
+    if ((seen[t] ?? 0) >= 3) continue;
+    seen[t] = (seen[t] ?? 0) + 1;
+    const metrics = f.metrics ? " | " + Object.entries(f.metrics)
+      .filter(([, v]) => v !== null && v !== "" && v !== 0)
+      .slice(0, 6)
+      .map(([k, v]) => `${k}=${v}`).join(", ") : "";
+    lines.push(`[${t}] ${f.src_ip}:${f.src_port} → ${f.dst_ip}:${f.dst_port}${metrics}`);
+  }
+
+  // Events summary
+  if (events.length > 0) {
+    lines.push(`\n=== Events/Alerts (${events.length} total) ===`);
+    for (const e of events.slice(0, 10)) {
+      lines.push(`- [${e.severity ?? "info"}] ${e.title ?? e.message ?? JSON.stringify(e).slice(0, 100)}`);
+    }
+  }
+
+  return lines.join("\n").slice(0, 12000); // hard cap ~3K tokens
+}
+
 export default function ChatPage() {
   const location = useLocation();
   const captureState = location.state as {
@@ -78,28 +131,33 @@ export default function ChatPage() {
         let contextData: object[] = captureState.packets ?? [];
         let alertSummary = "";
 
+        let flows: any[] = [];
+        let events: any[] = [];
+
         if (contextData.length === 0) {
           // Navigated from job detail — fetch events and flows as context
           const [eventsRes, flowsRes] = await Promise.all([
             api.get(`/jobs/${jobId}/events`).then(r => r.data).catch(() => []),
             api.get(`/jobs/${jobId}/flows`).then(r => r.data).catch(() => []),
           ]);
-          contextData = [...(eventsRes ?? []).slice(0, 20), ...(flowsRes ?? []).slice(0, 20)];
-          const events = eventsRes ?? [];
-          if (events.length > 0) {
-            alertSummary = `\n\nEvents/alerts detected (${events.length}):\n` +
-              JSON.stringify(events.slice(0, 10), null, 2);
-          }
+          flows = flowsRes ?? [];
+          events = eventsRes ?? [];
         } else {
-          const alerts = captureState.alerts ?? [];
-          if (alerts.length > 0) {
-            alertSummary = `\n\nAlerts detected (${alerts.length}):\n` +
-              JSON.stringify(alerts.slice(0, 10), null, 2);
-          }
+          flows = contextData;
+          events = captureState.alerts ?? [];
         }
 
+        if (events.length > 0) {
+          alertSummary = `\n\nAlerts/Events (${events.length} total):\n` +
+            events.slice(0, 5).map((e: any) =>
+              `- [${e.severity ?? e.type ?? "info"}] ${e.title ?? e.message ?? JSON.stringify(e).slice(0, 120)}`
+            ).join("\n");
+        }
+
+        // Build compact text summary instead of raw JSON to stay within token limits
+        const context = buildPcapSummary(jobId, flows, events);
+
         const question = `Please analyze this network capture (Job #${jobId}) and explain what is happening on the network. Identify any issues, anomalies, or noteworthy patterns.${alertSummary}`;
-        const context = JSON.stringify(contextData.slice(0, 50));
 
         // Show user message immediately
         setMessages([
@@ -223,7 +281,7 @@ export default function ChatPage() {
 
     const packetCtx =
       useLiveContext && livePackets.length > 0
-        ? JSON.stringify(livePackets.slice(-20))
+        ? buildPcapSummary(0, livePackets.slice(-100), [])
         : undefined;
 
     abortRef.current = sendMessageStream(
