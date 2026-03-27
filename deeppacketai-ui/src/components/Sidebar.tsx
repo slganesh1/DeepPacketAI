@@ -39,7 +39,7 @@ export default function Sidebar() {
   const location = useLocation();
 
   return (
-    <div className="w-64 bg-slate-900 text-white flex flex-col border-r border-slate-700/50">
+    <div className="w-64 bg-slate-900 text-white flex flex-col border-r border-slate-700">
       {/* Logo */}
       <div className="px-4 py-4 border-b border-slate-700/50">
         <img src="/techtezlogo.svg" alt="Techtez" className="h-7 w-auto" />
