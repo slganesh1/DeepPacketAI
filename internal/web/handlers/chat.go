@@ -91,12 +91,19 @@ func (h *ChatHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Truncate packet context to ~12000 chars (~3K tokens) before storing.
+	// Raw flow JSON from large PCAPs can easily exceed 200K tokens otherwise.
+	ctx := req.PacketContext
+	if len(ctx) > 12000 {
+		ctx = ctx[:12000] + "\n...[truncated for token limit]"
+	}
+
 	// Store user message
 	userMsg := storage.ChatMessage{
 		ConversationID:    convID,
 		Role:              "user",
 		Content:           req.Content,
-		PacketContextJSON: req.PacketContext,
+		PacketContextJSON: ctx,
 	}
 	if err := h.store.AddChatMessage(userMsg); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store message"})
@@ -117,7 +124,11 @@ func (h *ChatHandler) SendMessage(w http.ResponseWriter, r *http.Request) {
 	for _, m := range messages {
 		content := m.Content
 		if m.PacketContextJSON != "" && !contextAttached {
-			content = "Network capture context:\n" + m.PacketContextJSON + "\n\nQuestion:\n" + content
+			pcapCtx := m.PacketContextJSON
+			if len(pcapCtx) > 12000 {
+				pcapCtx = pcapCtx[:12000] + "\n...[truncated]"
+			}
+			content = "Network capture context:\n" + pcapCtx + "\n\nQuestion:\n" + content
 			contextAttached = true
 		}
 		llmMessages = append(llmMessages, ai.Message{
