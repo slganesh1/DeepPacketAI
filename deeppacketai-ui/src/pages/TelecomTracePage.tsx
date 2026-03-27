@@ -572,6 +572,7 @@ export default function TelecomTracePage() {
   const [sessions, setSessions] = useState<TelecomSession[]>([]);
   const [selected, setSelected] = useState<TelecomSession | null>(null);
   const [loading, setLoading] = useState(true);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
 
@@ -581,11 +582,23 @@ export default function TelecomTracePage() {
       .then(({ data }) => {
         const list: TelecomSession[] = data ?? [];
         setSessions(list);
-        if (list.length > 0) setSelected(list[0]);
+        // Select first but lazy-load its detail
+        if (list.length > 0) selectSession(list[0]);
       })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
+
+  // Fetch full session detail (events + lifecycle) when a session is selected
+  const selectSession = (s: TelecomSession) => {
+    setSelected(s);
+    if (s.events !== undefined) return; // already loaded
+    setDetailLoading(true);
+    api.get(`/telecom-sessions/${encodeURIComponent(s.session_id)}?job_id=0`)
+      .then(({ data }) => setSelected(data))
+      .catch(() => {/* keep metadata-only view */})
+      .finally(() => setDetailLoading(false));
+  };
 
   // Filter sessions by search term (IMSI, MSISDN, UE IP, SIP, TEID)
   const filtered = sessions.filter((s) => {
@@ -678,7 +691,7 @@ export default function TelecomTracePage() {
                   key={s.session_id}
                   session={s}
                   selected={selected?.session_id === s.session_id}
-                  onClick={() => setSelected(s)}
+                  onClick={() => selectSession(s)}
                 />
               ))}
             </div>
@@ -686,7 +699,11 @@ export default function TelecomTracePage() {
 
           {/* Detail panel */}
           <div className="flex-1 min-w-0 max-h-[calc(100vh-300px)] overflow-y-auto">
-            {selected ? (
+            {detailLoading ? (
+              <div className="flex items-center justify-center h-full text-slate-400 text-sm animate-pulse">
+                Loading session detail…
+              </div>
+            ) : selected ? (
               <SessionDetail session={selected} />
             ) : (
               <div className="flex items-center justify-center h-full text-slate-500 text-sm">

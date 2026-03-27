@@ -32,7 +32,7 @@ export default function AppLayout({ children, username, onLogout }: Props) {
         </div>
 
         {/* Page Content */}
-        <div className="flex-1 overflow-y-auto p-6">{children}</div>
+        <div className="flex-1 overflow-y-auto p-6 bg-slate-950">{children}</div>
       </div>
     </div>
   );

@@ -82,6 +82,7 @@ func (s *SQLiteStore) StoreTelecomSessions(jobID int64, sessions []domain.Teleco
 	return tx.Commit()
 }
 
+// selectTelecomCols is used for single-session detail fetch — includes all JSON blobs.
 const selectTelecomCols = `
 	SELECT session_id, imsi, msisdn, apn, ue_ip,
 	       sip_call_id, sip_from, sip_to,
@@ -92,13 +93,25 @@ const selectTelecomCols = `
 	       teids_json, bearer_teids_json, lifecycle_json
 `
 
-// ListTelecomSessions returns all telecom sessions for a job.
+// selectTelecomListCols omits events_json and lifecycle_json for fast list queries.
+// These large blobs are only loaded in GetTelecomSession (detail view).
+const selectTelecomListCols = `
+	SELECT session_id, imsi, msisdn, apn, ue_ip,
+	       sip_call_id, sip_from, sip_to,
+	       start_time, end_time, mos, quality,
+	       has_ngap, has_gtpc, has_pfcp, has_gtpu, has_sip, has_rtp, has_diameter, is_complete,
+	       layers_json, NULL,
+	       rat_type, serving_network, location, pdn_type, ue_state,
+	       teids_json, bearer_teids_json, NULL
+`
+
+// ListTelecomSessions returns session metadata for a job (no events/lifecycle blobs).
 func (s *SQLiteStore) ListTelecomSessions(jobID int64) ([]domain.TelecomSession, error) {
 	ctx, cancel := queryCtx()
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx,
-		selectTelecomCols+`FROM telecom_sessions WHERE job_id = ? ORDER BY start_time ASC`,
+		selectTelecomListCols+`FROM telecom_sessions WHERE job_id = ? ORDER BY start_time ASC LIMIT 500`,
 		jobID)
 	if err != nil {
 		return nil, err
@@ -131,13 +144,13 @@ func (s *SQLiteStore) GetTelecomSession(jobID int64, sessionID string) (*domain.
 	return &sessions[0], nil
 }
 
-// ListAllTelecomSessions returns telecom sessions across all jobs (latest job wins on dup session_id).
+// ListAllTelecomSessions returns session metadata across all jobs (no events/lifecycle blobs).
 func (s *SQLiteStore) ListAllTelecomSessions() ([]domain.TelecomSession, error) {
 	ctx, cancel := queryCtx()
 	defer cancel()
 
 	rows, err := s.db.QueryContext(ctx,
-		selectTelecomCols+`FROM telecom_sessions ORDER BY job_id DESC, start_time ASC`)
+		selectTelecomListCols+`FROM telecom_sessions ORDER BY job_id DESC, start_time ASC LIMIT 500`)
 	if err != nil {
 		return nil, err
 	}
