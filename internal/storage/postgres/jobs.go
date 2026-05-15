@@ -7,14 +7,15 @@ import (
 	"DeepPacketAI/internal/web/api"
 )
 
-func (s *PostgresStore) CreateJob(jobID int64, pcap string) error {
+func (s *PostgresStore) CreateJob(pcap string) (int64, error) {
 	ctx, cancel := writeCtx()
 	defer cancel()
-	_, err := s.pool.Exec(ctx,
-		`INSERT INTO jobs (id, pcap_path, status, started_at) VALUES ($1, $2, 'running', NOW())`,
-		jobID, pcap,
-	)
-	return err
+	var id int64
+	err := s.pool.QueryRow(ctx,
+		`INSERT INTO jobs (pcap_path, status, started_at) VALUES ($1, 'running', NOW()) RETURNING id`,
+		pcap,
+	).Scan(&id)
+	return id, err
 }
 
 func (s *PostgresStore) FailJob(jobID int64, reason string) error {
@@ -34,6 +35,40 @@ func (s *PostgresStore) CompleteJob(jobID int64) error {
 		`UPDATE jobs SET status='completed', completed_at=NOW() WHERE id=$1`,
 		jobID,
 	)
+	return err
+}
+
+func (s *PostgresStore) ResetStaleJobs() {
+	ctx, cancel := writeCtx()
+	defer cancel()
+	s.pool.Exec(ctx, `UPDATE jobs SET status='failed', error='interrupted by server restart' WHERE status='running'`)
+}
+
+func (s *PostgresStore) DeleteJob(jobID int64) error {
+	ctx, cancel := writeCtx()
+	defer cancel()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("DeleteJob begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+	tables := []string{"packets", "flows", "calls", "rtp_legs", "protocol_events", "telecom_sessions", "traffic_stats"}
+	for _, t := range tables {
+		if _, err := tx.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE job_id = $1", t), jobID); err != nil {
+			// Table may not exist yet on older schemas — keep going.
+			_ = err
+		}
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM jobs WHERE id = $1", jobID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) PurgeAllPackets() error {
+	ctx, cancel := writeCtx()
+	defer cancel()
+	_, err := s.pool.Exec(ctx, "DELETE FROM packets")
 	return err
 }
 

@@ -49,11 +49,17 @@ type Engine struct {
 	aiRegistry  *ai.ProviderRegistry  // optional: set via SetAIRegistry
 	dispatcher  *alerting.Dispatcher  // optional: set via SetDispatcher
 	geoEnricher *geoip.Enricher       // optional: set via SetGeoEnricher
+	activeJobs  sync.WaitGroup        // tracks in-flight analyzeAndStore goroutines
 }
 
-// NewEngine creates a new capture engine.
+// NewEngine creates a new capture engine with default configuration.
 func NewEngine(hub *ws.Hub, db storage.Store) *Engine {
-	cfg := DefaultCaptureConfig()
+	return NewEngineWithConfig(hub, db, DefaultCaptureConfig())
+}
+
+// NewEngineWithConfig creates a capture engine with the given configuration.
+// Use this to enable non-default backends such as AF_XDP (cfg.UseXDP = true).
+func NewEngineWithConfig(hub *ws.Hub, db storage.Store, cfg CaptureConfig) *Engine {
 	return &Engine{
 		hub:      hub,
 		db:       db,
@@ -193,10 +199,12 @@ func (e *Engine) StartCapture(iface, bpfFilter string) (*Session, error) {
 	session := NewSession(sessionID, iface, bpfFilter)
 
 	// Create a job for this capture session
-	jobID := time.Now().UnixMilli()
+	var jobID int64
 	if e.db != nil {
-		if err := e.db.CreateJob(jobID, "live-capture:"+iface); err != nil {
-			log.Printf("warning: failed to create job for capture: %v", err)
+		var jobErr error
+		jobID, jobErr = e.db.CreateJob("live-capture:" + iface)
+		if jobErr != nil {
+			log.Printf("warning: failed to create job for capture: %v", jobErr)
 		}
 	}
 	session.JobID = jobID
@@ -233,23 +241,27 @@ func (e *Engine) StartCapture(iface, bpfFilter string) (*Session, error) {
 			}
 			session.BufferPacket(buffered)
 
-			e.hub.Broadcast(ws.Message{
-				Type: ws.MsgPacket,
-				Payload: map[string]any{
-					"frame":        pkt.FrameNumber,
-					"timestamp":    pkt.Timestamp,
-					"src_ip":       pkt.SrcIP,
-					"dst_ip":       pkt.DstIP,
-					"src_port":     pkt.SrcPort,
-					"dst_port":     pkt.DstPort,
-					"protocol":     pkt.Protocol,
-					"app_protocol": pkt.AppProtocol,
-					"length":       pkt.Length,
-					"summary":      pkt.Summary,
-					"metadata":     pkt.Metadata,
-					"errors":       pkt.Errors,
-				},
-			})
+			// Sample 1-in-10 raw packets; always forward decoded app-layer traffic.
+			// This prevents the WebSocket bus from becoming a bottleneck at high pps.
+			if pkt.AppProtocol != "" || pkt.FrameNumber%10 == 0 {
+				e.hub.Broadcast(ws.Message{
+					Type: ws.MsgPacket,
+					Payload: map[string]any{
+						"frame":        pkt.FrameNumber,
+						"timestamp":    pkt.Timestamp,
+						"src_ip":       pkt.SrcIP,
+						"dst_ip":       pkt.DstIP,
+						"src_port":     pkt.SrcPort,
+						"dst_port":     pkt.DstPort,
+						"protocol":     pkt.Protocol,
+						"app_protocol": pkt.AppProtocol,
+						"length":       pkt.Length,
+						"summary":      pkt.Summary,
+						"metadata":     pkt.Metadata,
+						"errors":       pkt.Errors,
+					},
+				})
+			}
 
 			if len(pkt.Errors) > 0 {
 				for _, pe := range pkt.Errors {
@@ -289,6 +301,7 @@ func (e *Engine) StartCapture(iface, bpfFilter string) (*Session, error) {
 	session.workers = workers
 
 	go e.statsLoop(session, stats, sources)
+	go e.periodicFlush(session)
 
 	// Wait for all workers to finish in background, then close sources
 	go func() {
@@ -336,8 +349,12 @@ func (e *Engine) StopCapture(sessionID string) (int64, error) {
 		},
 	})
 
-	// Run analysis and persistence in background
-	go e.analyzeAndStore(session)
+	// Run analysis and persistence in background; tracked for graceful shutdown.
+	e.activeJobs.Add(1)
+	go func() {
+		defer e.activeJobs.Done()
+		e.analyzeAndStore(session)
+	}()
 
 	return session.JobID, nil
 }
@@ -359,6 +376,34 @@ func (e *Engine) ListSessions() []*Session {
 		result = append(result, s)
 	}
 	return result
+}
+
+// StopAll stops every running capture session. Call WaitIdle afterwards to
+// ensure all analyzeAndStore goroutines have finished flushing to the DB.
+func (e *Engine) StopAll() {
+	e.mu.RLock()
+	sessions := make([]*Session, 0, len(e.sessions))
+	for _, s := range e.sessions {
+		sessions = append(sessions, s)
+	}
+	e.mu.RUnlock()
+
+	for _, s := range sessions {
+		s.statusMu.Lock()
+		running := s.Status == "running"
+		s.statusMu.Unlock()
+		if running {
+			if _, err := e.StopCapture(s.ID); err != nil {
+				log.Printf("StopAll: error stopping session %s: %v", s.ID, err)
+			}
+		}
+	}
+}
+
+// WaitIdle blocks until all background analyzeAndStore goroutines have finished.
+// Use after StopAll to guarantee no data is lost before the process exits.
+func (e *Engine) WaitIdle() {
+	e.activeJobs.Wait()
 }
 
 func (e *Engine) statsLoop(session *Session, stats *Stats, sources []CaptureSource) {
@@ -429,7 +474,52 @@ func (e *Engine) statsLoop(session *Session, stats *Stats, sources []CaptureSour
 	}
 }
 
-// analyzeAndStore runs the batch analysis pipeline on captured packets and stores results.
+// periodicFlush drains the session packet buffer to the database every 10 seconds.
+// This prevents unbounded RAM growth during long captures (e.g. router monitoring).
+// DB writes run in a separate goroutine with a semaphore (max 2 concurrent writes)
+// so a slow DB never blocks the drain ticker — the buffer keeps emptying even when
+// writes are lagging behind.
+func (e *Engine) periodicFlush(session *Session) {
+	if e.db == nil {
+		return
+	}
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	// Semaphore: allow at most 2 concurrent StorePackets calls so we don't pile
+	// up unbounded goroutines if the DB is slower than our flush interval.
+	sem := make(chan struct{}, 2)
+
+	for {
+		select {
+		case <-session.StopCh():
+			return
+		case <-ticker.C:
+			pkts := session.DrainPackets()
+			if len(pkts) == 0 {
+				continue
+			}
+			select {
+			case sem <- struct{}{}: // acquire
+				go func(batch []*domain.Packet) {
+					defer func() { <-sem }() // release
+					if err := e.db.StorePackets(session.JobID, session.ID, batch); err != nil {
+						log.Printf("periodicFlush session=%s: %v", session.ID, err)
+					}
+				}(pkts)
+			default:
+				// Both write slots busy: put packets back to avoid losing them.
+				// This is rare; under normal conditions writes complete well within
+				// the 10-second interval.
+				log.Printf("periodicFlush session=%s: DB writes busy, re-queueing %d packets", session.ID, len(pkts))
+				for _, p := range pkts {
+					session.BufferPacket(p)
+				}
+			}
+		}
+	}
+}
+
 func (e *Engine) analyzeAndStore(session *Session) {
 	if e.db == nil {
 		return
@@ -462,8 +552,8 @@ func (e *Engine) analyzeAndStore(session *Session) {
 	}
 	log.Printf("session %s: %d flows from workers", session.ID, len(flows))
 
-	// 2. Run detection engine (built-in + user-defined rules)
-	rules := detection.BuiltinRules()
+	// 2. Run detection engine (built-in + 5GC + user-defined rules)
+	rules := append(detection.BuiltinRules(), detection.Builtin5GCRules()...)
 	if e.db != nil {
 		rules = append(rules, detection.LoadUserRules(e.db)...)
 	}
@@ -540,11 +630,13 @@ func (e *Engine) analyzeAndStore(session *Session) {
 		log.Printf("warning: failed to store RTP legs for session %s: %v", session.ID, err)
 	}
 
-	// 8. Store buffered packets
-	pkts := session.GetPackets()
-	log.Printf("session %s: storing %d packets", session.ID, len(pkts))
-	if err := e.db.StorePackets(session.JobID, session.ID, pkts); err != nil {
-		log.Printf("warning: failed to store packets for session %s: %v", session.ID, err)
+	// 8. Store any packets not yet flushed by the periodic flush goroutine.
+	pkts := session.DrainPackets()
+	log.Printf("session %s: storing %d remaining packets", session.ID, len(pkts))
+	if len(pkts) > 0 {
+		if err := e.db.StorePackets(session.JobID, session.ID, pkts); err != nil {
+			log.Printf("warning: failed to store packets for session %s: %v", session.ID, err)
+		}
 	}
 
 	// 9. Complete the job

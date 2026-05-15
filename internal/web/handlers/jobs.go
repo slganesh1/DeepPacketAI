@@ -215,6 +215,32 @@ func (h *JobHandler) ListJobEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, events)
 }
 
+// DeleteJob removes a job and all its associated data.
+// DELETE /api/v1/jobs/{id}
+func (h *JobHandler) DeleteJob(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid job id"})
+		return
+	}
+	if err := h.store.DeleteJob(id); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// PurgePackets deletes all raw packet rows across all jobs (keeps flows/events/metadata).
+// DELETE /api/v1/jobs/packets
+func (h *JobHandler) PurgePackets(w http.ResponseWriter, r *http.Request) {
+	if err := h.store.PurgeAllPackets(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "purged"})
+}
+
 // GetJobContext returns a structured text context for a specific job,
 // including per-flow details, per-call details, and events/alerts.
 // This is used by the AI chat to have actual data about the PCAP analysis.

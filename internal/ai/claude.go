@@ -167,9 +167,7 @@ func (p *ClaudeProvider) Stream(ctx context.Context, req CompletionRequest) (<-c
 }
 
 func parseSSEStream(body io.Reader, ch chan<- StreamChunk) {
-	decoder := json.NewDecoder(body)
-	buf := make([]byte, 0, 4096)
-	_ = buf
+	_ = json.NewDecoder(body) // keep import; actual parsing is line-by-line below
 
 	// Read line by line for SSE
 	data := make([]byte, 4096)
@@ -220,7 +218,6 @@ func parseSSEStream(body io.Reader, ch chan<- StreamChunk) {
 			return
 		}
 	}
-	_ = decoder // suppress unused warning
 }
 
 func indexOf(s, substr string) int {

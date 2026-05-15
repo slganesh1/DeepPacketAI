@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"time"
+
 	"DeepPacketAI/internal/domain"
 	"DeepPacketAI/internal/web/api"
 )
@@ -8,12 +10,18 @@ import (
 // Store is the unified storage interface implemented by SQLiteStore and PostgresStore.
 type Store interface {
 	// Job lifecycle
-	CreateJob(jobID int64, pcap string) error
+	// CreateJob inserts a new job row and returns the DB-assigned ID.
+	CreateJob(pcap string) (int64, error)
 	FailJob(jobID int64, reason string) error
 	CompleteJob(jobID int64) error
 	ClearJobData(jobID int64) error
+	DeleteJob(jobID int64) error
+	ResetStaleJobs()
 	GetJob(jobID int64) (*api.JobItem, error)
 	ListJobs(limit int, status string) ([]api.JobItem, error)
+
+	// Maintenance
+	PurgeAllPackets() error
 
 	// Packets
 	StorePackets(jobID int64, sessionID string, packets []*domain.Packet) error
@@ -94,6 +102,12 @@ type Store interface {
 	GetConversation(id string) (*Conversation, []ChatMessage, error)
 	AddChatMessage(msg ChatMessage) error
 	DeleteConversation(id string) error
+
+	// Sessions (persisted across restarts)
+	CreateSession(token, username string, expiresAt time.Time) error
+	GetSession(token string) (username string, ok bool, err error)
+	DeleteSession(token string) error
+	PurgeExpiredSessions() error
 
 	Close() error
 }

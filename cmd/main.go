@@ -7,8 +7,10 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	"DeepPacketAI/internal/ai"
@@ -18,13 +20,14 @@ import (
 	"DeepPacketAI/internal/geoip"
 	"DeepPacketAI/internal/storage"
 	_ "DeepPacketAI/internal/storage/postgres"
+	"DeepPacketAI/internal/stream"
 	"DeepPacketAI/internal/web"
 	"DeepPacketAI/internal/ws"
 	uidist "DeepPacketAI/deeppacketai-ui"
 )
 
 func main() {
-	// ---- Load .env file (before anything else so flags/config can use the vars) ----
+	// ---- Load .env file ----
 	loadDotEnv()
 
 	// ---- Flags ----
@@ -32,42 +35,85 @@ func main() {
 	serverOnly := flag.Bool("server", false, "Start API server (default when no -pcap flag)")
 	noBrowser  := flag.Bool("no-browser", false, "Do not open browser on startup")
 
-	// Distributed mode flags
-	mode           := flag.String("mode", "standalone", "Operation mode: standalone | agent | central")
-	centralAddr    := flag.String("central", "", "Central node address for agent mode (host:port, e.g. 192.168.1.10:9090)")
-	agentID        := flag.String("agent-id", "", "Agent identifier (default: hostname-iface)")
-	iface          := flag.String("iface", "", "Network interface for agent mode capture")
-	bpfFilter      := flag.String("filter", "", "BPF filter expression for agent mode (e.g. 'port 5060')")
-	streamPort     := flag.String("stream-port", ":9090", "TCP port for central to receive agent streams")
-	listIfaces     := flag.Bool("list-interfaces", false, "List available network interfaces and exit")
+	// Operation mode
+	mode        := flag.String("mode", "standalone", "Operation mode: standalone | agent | central")
+	streamPort  := flag.String("stream-port", ":9090", "TCP port for central to receive agent streams")
+	listIfaces  := flag.Bool("list-interfaces", false, "List available network interfaces and exit")
+	useXDP      := flag.Bool("xdp", false, "Use AF_XDP + eBPF capture backend (Linux 5.10+, faster; requires CAP_BPF)")
+
+	// Agent capture flags
+	iface     := flag.String("iface", "", "Network interface(s) for agent mode — comma-separated for multi-interface (e.g. eth0,eth1)")
+	bpfFilter := flag.String("filter", "", "BPF filter expression (e.g. 'port 5060 or port 443')")
+	centralAddr := flag.String("central", "", "Central node address for agent mode (host:port)")
+	agentID   := flag.String("agent-id", "", "Agent identifier (default: hostname-iface)")
+	maxMbps   := flag.Float64("max-mbps", 0, "Agent outbound bandwidth cap in Mbit/s (0 = unlimited)")
+
+	// Stream security flags
+	streamToken   := flag.String("stream-token", "", "Pre-shared token for agent authentication (env: STREAM_TOKEN)")
+	streamTLS     := flag.Bool("tls", false, "Agent: enable TLS for the agent→central stream")
+	streamTLSSkip := flag.Bool("tls-skip-verify", false, "Agent: skip TLS server certificate verification (use with self-signed certs)")
+	streamTLSCA   := flag.String("tls-ca", "", "Agent: path to CA certificate PEM file for verifying central")
+	streamTLSCert := flag.String("stream-tls-cert", "", "Central: TLS certificate PEM file")
+	streamTLSKey  := flag.String("stream-tls-key", "", "Central: TLS private key PEM file")
+
+	// Service installer flags
+	installAgent   := flag.Bool("install-agent", false, "Install deeppacketai-agent as a system service and exit")
+	uninstallAgent := flag.Bool("uninstall-agent", false, "Uninstall the deeppacketai-agent system service and exit")
 
 	flag.Parse()
 
-	// ---- List interfaces and exit (useful for finding Windows device names) ----
+	// ---- Resolve token (flag takes priority; fall back to env) ----
+	token := *streamToken
+	if token == "" {
+		token = os.Getenv("STREAM_TOKEN")
+	}
+
+	// ---- List interfaces ----
 	if *listIfaces {
 		listInterfaces()
 		return
 	}
 
-	// ---- Agent mode: capture-only, no UI, no DB ----
-	if *mode == "agent" {
-		runAgent(*iface, *bpfFilter, *centralAddr, *agentID)
+	// ---- Service installer ----
+	if *installAgent {
+		if err := installAgentService(); err != nil {
+			log.Fatalf("install-agent: %v", err)
+		}
+		return
+	}
+	if *uninstallAgent {
+		if err := uninstallAgentService(); err != nil {
+			log.Fatalf("uninstall-agent: %v", err)
+		}
 		return
 	}
 
-	// Default: start server if no PCAP file provided, or alongside PCAP analysis
+	// ---- Agent mode ----
+	if *mode == "agent" {
+		runAgent(AgentFlags{
+			Ifaces:      *iface,
+			BPFFilter:   *bpfFilter,
+			CentralAddr: *centralAddr,
+			AgentID:     *agentID,
+			Token:       token,
+			UseTLS:      *streamTLS,
+			TLSSkipVfy:  *streamTLSSkip,
+			TLSCA:       *streamTLSCA,
+			MaxMbps:     *maxMbps,
+		})
+		return
+	}
+
 	startServer := *serverOnly || *pcapFile == "" || *mode == "central"
 
-	// ---- App data directory (%APPDATA%\DeepPacketAI on Windows) ----
+	// ---- App data directory ----
 	appDataDir := appDataPath("DeepPacketAI")
 	if err := os.MkdirAll(appDataDir, 0755); err != nil {
 		log.Fatalf("failed to create app data directory: %v", err)
 	}
 
-	// ---- Redirect logs to file when running without a console (windowsgui build) ----
 	setupLogging(appDataDir)
 
-	// ---- Npcap check (Windows live capture requires Npcap/WinPcap) ----
 	if runtime.GOOS == "windows" && !isNpcapInstalled() {
 		log.Println("WARNING: Npcap not found. Live packet capture will be unavailable.")
 		log.Println("         Download Npcap from https://npcap.com and install it.")
@@ -75,31 +121,22 @@ func main() {
 
 	// ---- Init database ----
 	dbPath := filepath.Join(appDataDir, "deeppacketai.db")
-	cfg := storage.Config{
-		Backend: "sqlite",
-		DSN:     dbPath,
-	}
+	cfg := storage.Config{Backend: "sqlite", DSN: dbPath}
 	if dsn := os.Getenv("DATABASE_URL"); dsn != "" {
 		cfg.Backend = "postgres"
 		cfg.DSN = dsn
 	}
-
 	db, err := storage.New(cfg)
 	if err != nil {
 		log.Fatalf("failed to init database: %v", err)
 	}
 	defer db.Close()
+	db.ResetStaleJobs()
 
-	// ---- Initialize AI provider registry ----
 	aiRegistry := ai.NewProviderRegistry()
-
-	// ---- Initialize alert dispatcher ----
 	alertDispatcher := alerting.New(db)
-
-	// ---- Initialize GeoIP enricher ----
 	geoEnricher := geoip.New(db)
 
-	// ---- Run PCAP analysis if requested ----
 	if *pcapFile != "" {
 		exec := execution.NewExecutor(db).WithAIRegistry(aiRegistry).WithDispatcher(alertDispatcher).WithGeoEnricher(geoEnricher)
 		if err := exec.RunPCAP(*pcapFile); err != nil {
@@ -108,23 +145,47 @@ func main() {
 		log.Println("PCAP analysis completed successfully")
 	}
 
-	// ---- Start API server ----
 	if startServer {
 		log.Println("Starting DeepPacketAI server on :8080")
 
-		// Initialize WebSocket hub
 		hub := ws.NewHub()
 		go hub.Run()
 
-		// Initialize capture engine
-		captureEngine := capture.NewEngine(hub, db)
+		capCfg := capture.DefaultCaptureConfig()
+		capCfg.UseXDP = *useXDP
+		captureEngine := capture.NewEngineWithConfig(hub, db, capCfg)
 		captureEngine.SetAIRegistry(aiRegistry)
 		captureEngine.SetDispatcher(alertDispatcher)
 		captureEngine.SetGeoEnricher(geoEnricher)
 
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		// Graceful shutdown on SIGTERM / SIGINT.
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			sig := <-sigCh
+			log.Printf("received signal %s — shutting down gracefully", sig)
+			// 1. Stop all active capture sessions (triggers analyzeAndStore goroutines).
+			captureEngine.StopAll()
+			// 2. Wait for all in-flight flush goroutines to finish writing to DB.
+			log.Println("waiting for in-flight capture jobs to finish...")
+			captureEngine.WaitIdle()
+			log.Println("all capture jobs done")
+			// 3. Cancel context → triggers HTTP server graceful shutdown.
+			cancel()
+		}()
+
 		// Central mode: start TCP receiver for agent streams
+		var agentRegistry *stream.AgentRegistry
 		if *mode == "central" {
-			startCentralReceiver(*streamPort, captureEngine)
+			centralCfg := stream.CentralConfig{
+				Token:   token,
+				TLSCert: *streamTLSCert,
+				TLSKey:  *streamTLSKey,
+			}
+			agentRegistry = startCentralReceiver(ctx, *streamPort, captureEngine, centralCfg)
 		}
 
 		providers := aiRegistry.List()
@@ -134,10 +195,8 @@ func main() {
 			log.Println("No AI providers configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY.")
 		}
 
-		// Resolve embedded UI
 		var uiFS fs.FS = uidist.FS
 
-		// Open browser after a short delay to let the server bind
 		if !*noBrowser {
 			go func() {
 				time.Sleep(1500 * time.Millisecond)
@@ -155,26 +214,24 @@ func main() {
 			AIRegistry:    aiRegistry,
 			Dispatcher:    alertDispatcher,
 			GeoEnricher:   geoEnricher,
+			AgentRegistry: agentRegistry,
 			UIAssets:      uiFS,
 			UploadsDir:    uploadsDir,
 		})
 
-		// BLOCKS forever
-		if err := app.Start(context.Background()); err != nil {
+		if err := app.Start(ctx); err != nil {
 			log.Fatalf("server failed: %v", err)
 		}
 	}
 }
 
-// appDataPath returns the OS-appropriate user data directory for the app.
-// Windows: %APPDATA%\<name>   macOS/Linux: ~/.local/share/<name>
 func appDataPath(name string) string {
 	if dir := os.Getenv("APPDATA"); dir != "" {
 		return filepath.Join(dir, name)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return name // fallback: relative directory
+		return name
 	}
 	if runtime.GOOS == "darwin" {
 		return filepath.Join(home, "Library", "Application Support", name)
@@ -182,13 +239,11 @@ func appDataPath(name string) string {
 	return filepath.Join(home, ".local", "share", name)
 }
 
-// isNpcapInstalled checks for Npcap or WinPcap DLLs on Windows.
 func isNpcapInstalled() bool {
-	candidates := []string{
+	for _, p := range []string{
 		`C:\Windows\System32\Npcap\wpcap.dll`,
 		`C:\Windows\System32\wpcap.dll`,
-	}
-	for _, p := range candidates {
+	} {
 		if _, err := os.Stat(p); err == nil {
 			return true
 		}
@@ -196,7 +251,6 @@ func isNpcapInstalled() bool {
 	return false
 }
 
-// openBrowser opens the given URL in the system default browser.
 func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {

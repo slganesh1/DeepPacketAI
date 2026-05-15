@@ -81,6 +81,11 @@ type afpacketSource struct {
 	frameSz  int
 	curBlock int
 	closed   int32 // atomic
+
+	// intra-block frame tracking: allows reading all frames in a block before
+	// returning it to the kernel. framesLeft == 0 means we need a new block.
+	framesLeft uint32
+	frameOff   int // byte offset in ring of the current frame header
 }
 
 func newAFPacketSource(ifIndex int, iface, bpfFilter string, fanoutGroup uint16, workerID int, cfg CaptureConfig) (*afpacketSource, error) {
@@ -186,19 +191,23 @@ func (s *afpacketSource) ReadPacket() (RawPacket, error) {
 			return RawPacket{}, io.EOF
 		}
 
-		// Get pointer to current block header
+		// If frames remain from the current block, extract the next one immediately.
+		if s.framesLeft > 0 {
+			if raw, ok := s.extractFrame(); ok {
+				return raw, nil
+			}
+			// Corrupt frame: framesLeft was reset; fall through to find the next block.
+			continue
+		}
+
+		// No pending frames — find the next ready block.
 		blockOffset := s.curBlock * s.blockSz
 		blockHdr := (*tpacketBlockDesc)(unsafe.Pointer(&s.ring[blockOffset]))
 
-		// Check if block is ready for userspace
 		status := atomic.LoadUint32(&blockHdr.blockStatus)
 		if status&tpStatusUser == 0 {
-			// Block not ready — poll with timeout
-			pollFds := []unix.PollFd{{
-				Fd:     int32(s.fd),
-				Events: unix.POLLIN,
-			}}
-			n, err := unix.Poll(pollFds, 100) // 100ms timeout
+			pollFds := []unix.PollFd{{Fd: int32(s.fd), Events: unix.POLLIN}}
+			n, err := unix.Poll(pollFds, 100) // 100 ms timeout
 			if err != nil {
 				if err == unix.EINTR {
 					continue
@@ -206,10 +215,8 @@ func (s *afpacketSource) ReadPacket() (RawPacket, error) {
 				return RawPacket{}, fmt.Errorf("poll: %w", err)
 			}
 			if n == 0 {
-				// Timeout — check if closed and retry
 				continue
 			}
-			// Re-check block status after poll
 			status = atomic.LoadUint32(&blockHdr.blockStatus)
 			if status&tpStatusUser == 0 {
 				continue
@@ -218,64 +225,56 @@ func (s *afpacketSource) ReadPacket() (RawPacket, error) {
 
 		numPkts := blockHdr.numPkts
 		if numPkts == 0 {
-			// Empty block, return it and move to next
 			atomic.StoreUint32(&blockHdr.blockStatus, tpStatusKernel)
 			s.curBlock = (s.curBlock + 1) % s.blockNr
 			continue
 		}
 
-		// Read the first frame in this block
-		frameOffset := blockOffset + int(blockHdr.offsetToFirst)
-		fhdr := (*tpacket3Hdr)(unsafe.Pointer(&s.ring[frameOffset]))
-
-		// Extract packet data — copy it since ring memory will be reused
-		macOff := int(fhdr.mac)
-		pktLen := int(fhdr.snaplen)
-		dataStart := frameOffset + macOff
-		dataEnd := dataStart + pktLen
-
-		if dataEnd > len(s.ring) {
-			// Corrupt frame, skip block
-			atomic.StoreUint32(&blockHdr.blockStatus, tpStatusKernel)
-			s.curBlock = (s.curBlock + 1) % s.blockNr
-			continue
-		}
-
-		pktData := make([]byte, pktLen)
-		copy(pktData, s.ring[dataStart:dataEnd])
-
-		ts := time.Unix(int64(fhdr.sec), int64(fhdr.nsec))
-
-		raw := RawPacket{
-			Data: pktData,
-			CaptureInfo: gopacket.CaptureInfo{
-				Timestamp:     ts,
-				CaptureLength: pktLen,
-				Length:        int(fhdr.len),
-			},
-		}
-
-		// If this was the only frame (or we simplify to one frame per ReadPacket call),
-		// return the block to the kernel. For multiple frames per block, we'd need
-		// to track frame position within the block. For simplicity and to avoid
-		// holding blocks too long, we process one frame and then check if more remain.
-		if numPkts <= 1 || fhdr.nextOffset == 0 {
-			// Last frame in block — return block to kernel
-			atomic.StoreUint32(&blockHdr.blockStatus, tpStatusKernel)
-			s.curBlock = (s.curBlock + 1) % s.blockNr
-		} else {
-			// More frames in this block. We need to advance within the block.
-			// To keep the interface simple (one ReadPacket = one packet), we return
-			// the block after reading just this frame. The block timeout ensures
-			// remaining frames get re-queued. In practice, with proper ring sizing
-			// blocks rarely contain more than a few frames.
-			// A production-grade implementation would track intra-block position.
-			atomic.StoreUint32(&blockHdr.blockStatus, tpStatusKernel)
-			s.curBlock = (s.curBlock + 1) % s.blockNr
-		}
-
-		return raw, nil
+		// Initialise intra-block traversal; extractFrame does the rest.
+		s.frameOff = blockOffset + int(blockHdr.offsetToFirst)
+		s.framesLeft = numPkts
 	}
+}
+
+// extractFrame reads the frame at s.frameOff, advances the cursor, and returns
+// the block to the kernel once the last frame in the block is consumed.
+// Returns (RawPacket, false) for corrupt frames — caller should continue.
+func (s *afpacketSource) extractFrame() (RawPacket, bool) {
+	fhdr := (*tpacket3Hdr)(unsafe.Pointer(&s.ring[s.frameOff]))
+
+	macOff := int(fhdr.mac)
+	pktLen := int(fhdr.snaplen)
+	dataStart := s.frameOff + macOff
+	dataEnd := dataStart + pktLen
+
+	// Advance cursor before any early-return so state stays consistent.
+	s.framesLeft--
+	isLast := s.framesLeft == 0 || fhdr.nextOffset == 0
+	if isLast {
+		s.framesLeft = 0
+		blockOffset := s.curBlock * s.blockSz
+		blockHdr := (*tpacketBlockDesc)(unsafe.Pointer(&s.ring[blockOffset]))
+		atomic.StoreUint32(&blockHdr.blockStatus, tpStatusKernel)
+		s.curBlock = (s.curBlock + 1) % s.blockNr
+	} else {
+		s.frameOff += int(fhdr.nextOffset)
+	}
+
+	if pktLen <= 0 || dataEnd > len(s.ring) {
+		return RawPacket{}, false // corrupt — skip
+	}
+
+	pktData := make([]byte, pktLen)
+	copy(pktData, s.ring[dataStart:dataEnd])
+
+	return RawPacket{
+		Data: pktData,
+		CaptureInfo: gopacket.CaptureInfo{
+			Timestamp:     time.Unix(int64(fhdr.sec), int64(fhdr.nsec)),
+			CaptureLength: pktLen,
+			Length:        int(fhdr.len),
+		},
+	}, true
 }
 
 func (s *afpacketSource) Stats() SourceStats {

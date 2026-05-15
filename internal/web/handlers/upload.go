@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +16,27 @@ import (
 
 	"github.com/go-chi/chi/v5"
 )
+
+// pcapMagicBytes lists the valid 4-byte file signatures for pcap and pcapng.
+var pcapMagicBytes = [][]byte{
+	{0xd4, 0xc3, 0xb2, 0xa1}, // pcap little-endian
+	{0xa1, 0xb2, 0xc3, 0xd4}, // pcap big-endian
+	{0x4d, 0x3c, 0xb2, 0xa1}, // pcap-ns little-endian (nanosecond timestamps)
+	{0xa1, 0xb2, 0x3c, 0x4d}, // pcap-ns big-endian
+	{0x0a, 0x0d, 0x0d, 0x0a}, // pcapng
+}
+
+func isPCAP(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	for _, magic := range pcapMagicBytes {
+		if bytes.Equal(data[:4], magic) {
+			return true
+		}
+	}
+	return false
+}
 
 type UploadHandler struct {
 	store      storage.Store
@@ -49,6 +71,22 @@ func (h *UploadHandler) UploadPCAP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	// Validate PCAP magic bytes before touching the filesystem.
+	magic := make([]byte, 4)
+	if _, err := io.ReadFull(file, magic); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file too small to be a valid PCAP"})
+		return
+	}
+	if !isPCAP(magic) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file is not a valid PCAP or PCAPNG (bad magic bytes)"})
+		return
+	}
+	// Seek back so the full file (including the 4 bytes we peeked) is written.
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to reset file reader"})
+		return
+	}
+
 	// Ensure uploads directory exists
 	uploadsDir := h.uploadsDir
 	if err := os.MkdirAll(uploadsDir, 0755); err != nil {
@@ -72,10 +110,8 @@ func (h *UploadHandler) UploadPCAP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create job first, then start async analysis with the same ID
-	// Use milliseconds (not nanoseconds) so the ID fits in JavaScript's safe integer range
-	jobID := time.Now().UnixMilli()
-	if err := h.store.CreateJob(jobID, destPath); err != nil {
+	jobID, err := h.store.CreateJob(destPath)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create job"})
 		return
 	}

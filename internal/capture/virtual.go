@@ -5,7 +5,6 @@ import (
 	"log"
 	"strings"
 	"sync"
-	"time"
 
 	"DeepPacketAI/internal/domain"
 	"DeepPacketAI/internal/pipeline"
@@ -15,19 +14,25 @@ import (
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
 	"github.com/google/gopacket/pcap"
+	"github.com/google/uuid"
 )
 
 // channelSource is a CaptureSource backed by a packet channel.
 // Used by central mode to inject packets received from remote agents into the
 // existing capture/analysis pipeline without any changes to that pipeline.
 type channelSource struct {
-	ch      <-chan RawPacket
-	stopCh  <-chan struct{}
-	drained bool
+	ch       <-chan RawPacket
+	stopCh   <-chan struct{}
+	drained  bool
+	linkType layers.LinkType
 }
 
-func newChannelSource(ch <-chan RawPacket, stopCh <-chan struct{}) *channelSource {
-	return &channelSource{ch: ch, stopCh: stopCh}
+func newChannelSource(ch <-chan RawPacket, stopCh <-chan struct{}, linkType int) *channelSource {
+	lt := layers.LinkType(linkType)
+	if lt == 0 {
+		lt = layers.LinkTypeEthernet
+	}
+	return &channelSource{ch: ch, stopCh: stopCh, linkType: lt}
 }
 
 // ReadPacket blocks until a packet arrives, the channel is closed, or the
@@ -53,24 +58,32 @@ func (s *channelSource) ReadPacket() (RawPacket, error) {
 	}
 }
 
-func (s *channelSource) Stats() SourceStats           { return SourceStats{} }
-func (s *channelSource) Decoder() gopacket.Decoder    { return layers.LinkTypeEthernet }
-func (s *channelSource) Close() error                 { return nil }
+func (s *channelSource) Stats() SourceStats        { return SourceStats{} }
+func (s *channelSource) Decoder() gopacket.Decoder { return s.linkType }
+func (s *channelSource) Close() error              { return nil }
 
 // StartVirtualCapture creates a capture session fed by an external packet
 // channel. Packets sent to the returned channel flow through the full
 // decode / analysis / storage pipeline, identical to a live local capture.
 //
+// linkType is the gopacket/layers.LinkType of the agent's capture interface
+// (e.g. int(layers.LinkTypeEthernet)). Pass 0 to default to Ethernet.
+//
 // Call StopCapture(session.ID) when the remote agent disconnects — this closes
 // the session's stop channel, unblocks the worker, and triggers analyzeAndStore.
-func (e *Engine) StartVirtualCapture(agentID, iface string) (*Session, chan<- RawPacket, error) {
-	sessionID := "agent-" + agentID + "-" + iface
+func (e *Engine) StartVirtualCapture(agentID, agentHost, iface string, linkType int) (*Session, chan<- RawPacket, error) {
+	// Include a short random suffix so reconnecting agents get a fresh session
+	// ID, preventing the deferred StopCapture of the old handler from
+	// accidentally stopping the new session.
+	sessionID := "agent-" + agentID + "-" + iface + "-" + uuid.New().String()[:8]
 	session := NewSession(sessionID, iface, "")
 
-	jobID := time.Now().UnixMilli()
+	var jobID int64
 	if e.db != nil {
-		if err := e.db.CreateJob(jobID, "agent:"+agentID+":"+iface); err != nil {
-			log.Printf("warning: failed to create job for agent session: %v", err)
+		var jobErr error
+		jobID, jobErr = e.db.CreateJob("agent:" + agentID + ":" + iface)
+		if jobErr != nil {
+			log.Printf("warning: failed to create job for agent session: %v", jobErr)
 		}
 	}
 	session.JobID = jobID
@@ -79,8 +92,8 @@ func (e *Engine) StartVirtualCapture(agentID, iface string) (*Session, chan<- Ra
 	e.sessions[sessionID] = session
 	e.mu.Unlock()
 
-	ch := make(chan RawPacket, 10000)
-	src := newChannelSource(ch, session.StopCh())
+	ch := make(chan RawPacket, 100_000)
+	src := newChannelSource(ch, session.StopCh(), linkType)
 
 	stats := NewStats()
 	var frameGen uint64
@@ -91,6 +104,14 @@ func (e *Engine) StartVirtualCapture(agentID, iface string) (*Session, chan<- Ra
 		return createSessionDecodersRaw()
 	})
 	decodePool.SetOnPacket(func(pkt *domain.Packet) {
+		// Tag packet with its originating agent so queries can filter by source.
+		meta := pkt.Metadata
+		if meta == nil {
+			meta = make(map[string]any)
+		}
+		meta["agent_id"] = agentID
+		meta["agent_host"] = agentHost
+
 		buffered := &domain.Packet{
 			Timestamp:   pkt.Timestamp,
 			SrcIP:       pkt.SrcIP,
@@ -102,28 +123,31 @@ func (e *Engine) StartVirtualCapture(agentID, iface string) (*Session, chan<- Ra
 			Length:      pkt.Length,
 			AppProtocol: pkt.AppProtocol,
 			Summary:     pkt.Summary,
-			Metadata:    pkt.Metadata,
+			Metadata:    meta,
 			Errors:      pkt.Errors,
 		}
 		session.BufferPacket(buffered)
 
-		e.hub.Broadcast(ws.Message{
-			Type: ws.MsgPacket,
-			Payload: map[string]any{
-				"frame":        pkt.FrameNumber,
-				"timestamp":    pkt.Timestamp,
-				"src_ip":       pkt.SrcIP,
-				"dst_ip":       pkt.DstIP,
-				"src_port":     pkt.SrcPort,
-				"dst_port":     pkt.DstPort,
-				"protocol":     pkt.Protocol,
-				"app_protocol": pkt.AppProtocol,
-				"length":       pkt.Length,
-				"summary":      pkt.Summary,
-				"metadata":     pkt.Metadata,
-				"errors":       pkt.Errors,
-			},
-		})
+		// Sample 1-in-10; always forward decoded app-layer traffic to the UI.
+		if pkt.AppProtocol != "" || pkt.FrameNumber%10 == 0 {
+			e.hub.Broadcast(ws.Message{
+				Type: ws.MsgPacket,
+				Payload: map[string]any{
+					"frame":        pkt.FrameNumber,
+					"timestamp":    pkt.Timestamp,
+					"src_ip":       pkt.SrcIP,
+					"dst_ip":       pkt.DstIP,
+					"src_port":     pkt.SrcPort,
+					"dst_port":     pkt.DstPort,
+					"protocol":     pkt.Protocol,
+					"app_protocol": pkt.AppProtocol,
+					"length":       pkt.Length,
+					"summary":      pkt.Summary,
+					"metadata":     pkt.Metadata,
+					"errors":       pkt.Errors,
+				},
+			})
+		}
 
 		if len(pkt.Errors) > 0 {
 			for _, pe := range pkt.Errors {
@@ -152,6 +176,7 @@ func (e *Engine) StartVirtualCapture(agentID, iface string) (*Session, chan<- Ra
 	go w.RunWithPool(decodePool)
 
 	go e.statsLoop(session, stats, []CaptureSource{src})
+	go e.periodicFlush(session)
 
 	go func() {
 		wg.Wait()

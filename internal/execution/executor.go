@@ -75,12 +75,10 @@ func (e *Executor) RunPCAPForJob(jobID int64, pcapPath string) error {
 }
 
 func (e *Executor) RunPCAP(pcapPath string) error {
-	jobID := time.Now().UnixMilli()
-
-	if err := e.db.CreateJob(jobID, pcapPath); err != nil {
+	jobID, err := e.db.CreateJob(pcapPath)
+	if err != nil {
 		return err
 	}
-
 	return e.runPCAP(jobID, pcapPath)
 }
 
@@ -160,7 +158,7 @@ func (e *Executor) runPCAP(jobID int64, pcapPath string) error {
 	if e.detectionReg != nil {
 		baseRules = e.detectionReg.ActiveRules()
 	} else {
-		baseRules = detection.BuiltinRules()
+		baseRules = append(detection.BuiltinRules(), detection.Builtin5GCRules()...)
 	}
 	// Append enabled user-defined rules from DB
 	baseRules = append(baseRules, detection.LoadUserRules(e.db)...)

@@ -11,6 +11,7 @@ type CaptureConfig struct {
 	RingFrameSize      int    // TPACKET_V3 frame size in bytes (default: 64 KiB)
 	FanoutGroup        uint16 // PACKET_FANOUT group ID (default: 0 = auto)
 	UseAFPacket        bool   // prefer AF_PACKET on Linux (ignored on other platforms)
+	UseXDP             bool   // prefer AF_XDP + eBPF on Linux (overrides UseAFPacket; Linux 5.10+ only)
 	PipelineBufferSize int    // per-worker channel buffer for decode pool (default: 4096)
 }
 
@@ -31,6 +32,7 @@ func DefaultCaptureConfig() CaptureConfig {
 		RingFrameSize:      1 << 16, // 64 KiB
 		FanoutGroup:        0,
 		UseAFPacket:        true,
+		UseXDP:             false, // opt-in via --xdp flag
 		PipelineBufferSize: 4096,
 	}
 }

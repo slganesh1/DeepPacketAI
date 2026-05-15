@@ -21,10 +21,12 @@ func BuiltinRules() []Rule {
 		pfcpFailureRule(),
 		oneWayAudioRule(),
 
-		// Category 1: Volume-based (3)
+		// Category 1: Volume-based (5)
 		packetVolumeSpike(),
 		largePacketRule(),
 		packetFloodRule(),
+		synFloodRule(),
+		icmpFloodRule(),
 
 		// Category 2: Protocol/Port (2)
 		unusualPortRule(),
@@ -438,6 +440,93 @@ func packetFloodRule() Rule {
 						Description: fmt.Sprintf("Source %s contributes %d packets (%.0f%% of total %d)", srcIP, count, ratio*100, ctx.Aggregates.TotalPackets),
 					})
 				}
+			}
+			return alerts
+		},
+	}
+}
+
+// synFloodRule detects TCP SYN flood attacks — many half-open connections from
+// a single source, indicating the attacker is sending SYN packets without
+// completing the three-way handshake.
+func synFloodRule() Rule {
+	return Rule{
+		Name:     "TCP SYN Flood",
+		Protocol: "TCP",
+		Check: func(ctx *RuleContext) []Alert {
+			if ctx.Aggregates == nil {
+				return nil
+			}
+			var alerts []Alert
+			for srcIP, synCount := range ctx.Aggregates.SYNOnlyFlowsPerSrcIP {
+				if synCount < 20 {
+					continue
+				}
+				severity := SeverityWarning
+				if synCount >= 100 {
+					severity = SeverityCritical
+				} else if synCount >= 50 {
+					severity = SeverityError
+				}
+				alerts = append(alerts, Alert{
+					ID:        uuid.New().String(),
+					Timestamp: time.Now(),
+					Severity:  severity,
+					Protocol:  "TCP",
+					Title:     fmt.Sprintf("TCP SYN Flood: %s (%d half-open connections)", srcIP, synCount),
+					Description: fmt.Sprintf(
+						"Source %s opened %d TCP connections that never completed the handshake (SYN sent, ACK never received) — possible SYN flood DoS attack",
+						srcIP, synCount,
+					),
+					Metadata: map[string]any{
+						"src_ip":          srcIP,
+						"syn_only_flows":  synCount,
+						"attack_type":     "syn_flood",
+					},
+				})
+			}
+			return alerts
+		},
+	}
+}
+
+// icmpFloodRule detects ICMP flood attacks — a high volume of ICMP flows from
+// a single source, indicating a ping flood or ICMP-based DoS.
+func icmpFloodRule() Rule {
+	return Rule{
+		Name:     "ICMP Flood",
+		Protocol: "ICMP",
+		Check: func(ctx *RuleContext) []Alert {
+			if ctx.Aggregates == nil {
+				return nil
+			}
+			var alerts []Alert
+			for srcIP, icmpCount := range ctx.Aggregates.ICMPFlowsPerSrcIP {
+				if icmpCount < 50 {
+					continue
+				}
+				severity := SeverityWarning
+				if icmpCount >= 500 {
+					severity = SeverityCritical
+				} else if icmpCount >= 200 {
+					severity = SeverityError
+				}
+				alerts = append(alerts, Alert{
+					ID:        uuid.New().String(),
+					Timestamp: time.Now(),
+					Severity:  severity,
+					Protocol:  "ICMP",
+					Title:     fmt.Sprintf("ICMP Flood: %s (%d ICMP flows)", srcIP, icmpCount),
+					Description: fmt.Sprintf(
+						"Source %s generated %d ICMP flows — possible ping flood or ICMP-based DoS attack",
+						srcIP, icmpCount,
+					),
+					Metadata: map[string]any{
+						"src_ip":      srcIP,
+						"icmp_flows":  icmpCount,
+						"attack_type": "icmp_flood",
+					},
+				})
 			}
 			return alerts
 		},

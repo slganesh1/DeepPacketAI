@@ -80,8 +80,9 @@ func (w *CaptureWorker) Run() {
 
 		frameNum := atomic.AddUint64(w.frameGen, 1)
 
-		packet := gopacket.NewPacket(raw.Data, w.firstDecoder, gopacket.Default)
-		// Apply capture info from the source
+		// NoCopy: raw.Data is a fresh per-packet allocation from ReadPacket,
+		// so gopacket can reference it directly without an extra copy.
+		packet := gopacket.NewPacket(raw.Data, w.firstDecoder, gopacket.NoCopy)
 		packet.Metadata().Timestamp = raw.CaptureInfo.Timestamp
 		packet.Metadata().CaptureLength = raw.CaptureInfo.CaptureLength
 		packet.Metadata().Length = raw.CaptureInfo.Length
@@ -154,23 +155,27 @@ func (w *CaptureWorker) Run() {
 		}
 		w.session.BufferPacket(buffered)
 
-		w.hub.Broadcast(ws.Message{
-			Type: ws.MsgPacket,
-			Payload: map[string]any{
-				"frame":        pkt.FrameNumber,
-				"timestamp":    pkt.Timestamp,
-				"src_ip":       pkt.SrcIP,
-				"dst_ip":       pkt.DstIP,
-				"src_port":     pkt.SrcPort,
-				"dst_port":     pkt.DstPort,
-				"protocol":     pkt.Protocol,
-				"app_protocol": pkt.AppProtocol,
-				"length":       pkt.Length,
-				"summary":      pkt.Summary,
-				"metadata":     pkt.Metadata,
-				"errors":       pkt.Errors,
-			},
-		})
+		// Broadcast to UI: always for decoded app-layer traffic; sample 1-in-10 otherwise
+		// to avoid overwhelming the WebSocket bus at high pps.
+		if pkt.AppProtocol != "" || frameNum%10 == 0 {
+			w.hub.Broadcast(ws.Message{
+				Type: ws.MsgPacket,
+				Payload: map[string]any{
+					"frame":        pkt.FrameNumber,
+					"timestamp":    pkt.Timestamp,
+					"src_ip":       pkt.SrcIP,
+					"dst_ip":       pkt.DstIP,
+					"src_port":     pkt.SrcPort,
+					"dst_port":     pkt.DstPort,
+					"protocol":     pkt.Protocol,
+					"app_protocol": pkt.AppProtocol,
+					"length":       pkt.Length,
+					"summary":      pkt.Summary,
+					"metadata":     pkt.Metadata,
+					"errors":       pkt.Errors,
+				},
+			})
+		}
 	}
 }
 

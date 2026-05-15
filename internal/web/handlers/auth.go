@@ -1,73 +1,169 @@
 package handlers
 
 import (
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/hex"
+	"log"
+	"net"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 )
 
-// hardcoded users: username -> sha256(password)
-var allowedUsers = map[string]string{
-	"Techtez":    hashPw("Techtez"),
-	"TechtezAI":  hashPw("TechtezAI"),
-	"TechtezPAI": hashPw("TechtezPAI"),
-}
-
-func hashPw(pw string) string {
-	h := sha256.Sum256([]byte(pw))
-	return hex.EncodeToString(h[:])
-}
-
-// in-memory session store: token -> username
-type sessionStore struct {
-	mu       sync.RWMutex
-	sessions map[string]sessionEntry
-}
-
-type sessionEntry struct {
-	username  string
-	expiresAt time.Time
-}
-
-var sessions = &sessionStore{sessions: make(map[string]sessionEntry)}
-
-func (s *sessionStore) create(username string) string {
-	token := uuid.New().String()
-	s.mu.Lock()
-	s.sessions[token] = sessionEntry{username: username, expiresAt: time.Now().Add(12 * time.Hour)}
-	s.mu.Unlock()
-	return token
-}
-
-func (s *sessionStore) get(token string) (string, bool) {
-	s.mu.RLock()
-	e, ok := s.sessions[token]
-	s.mu.RUnlock()
-	if !ok || time.Now().After(e.expiresAt) {
-		return "", false
+// loadAllowedUsers builds the username→bcrypt-hash map from DPAI_USERS.
+//
+//	DPAI_USERS="admin:s3cr3t,viewer:readonly"
+//
+// If DPAI_USERS is not set, a random password is generated and printed to
+// stdout once at startup so the operator can log in without baking credentials
+// into the binary.
+func loadAllowedUsers() map[string][]byte {
+	raw := os.Getenv("DPAI_USERS")
+	if raw == "" {
+		pw := randomPassword()
+		hash := mustBcrypt(pw)
+		log.Printf("⚠️  DPAI_USERS not set — generated one-time admin password: %s", pw)
+		log.Println("   Set DPAI_USERS=\"admin:<password>\" to make this permanent.")
+		return map[string][]byte{"admin": hash}
 	}
-	return e.username, true
+
+	users := make(map[string][]byte)
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		idx := strings.Index(entry, ":")
+		if idx < 1 {
+			log.Printf("auth: ignoring malformed DPAI_USERS entry %q (expected user:pass)", entry)
+			continue
+		}
+		username := strings.TrimSpace(entry[:idx])
+		password := entry[idx+1:]
+		users[username] = mustBcrypt(password)
+	}
+	if len(users) == 0 {
+		log.Fatal("auth: DPAI_USERS contained no valid entries — refusing to start with no credentials")
+	}
+	log.Printf("auth: loaded %d user(s) from DPAI_USERS", len(users))
+	return users
 }
 
-func (s *sessionStore) delete(token string) {
-	s.mu.Lock()
-	delete(s.sessions, token)
-	s.mu.Unlock()
+var allowedUsers = loadAllowedUsers()
+
+// ── Login rate limiter ────────────────────────────────────────────────────────
+
+const (
+	loginMaxAttempts = 5
+	loginWindow      = 60 * time.Second
+)
+
+type ipBucket struct {
+	count     int
+	windowEnd time.Time
 }
+
+var loginLimiter = struct {
+	mu      sync.Mutex
+	buckets map[string]*ipBucket
+}{buckets: make(map[string]*ipBucket)}
+
+// loginAllowed returns true if the IP has not exceeded loginMaxAttempts within
+// loginWindow. Call unconditionally — it increments the counter each time.
+func loginAllowed(ip string) bool {
+	loginLimiter.mu.Lock()
+	defer loginLimiter.mu.Unlock()
+	now := time.Now()
+	b, ok := loginLimiter.buckets[ip]
+	if !ok || now.After(b.windowEnd) {
+		loginLimiter.buckets[ip] = &ipBucket{count: 1, windowEnd: now.Add(loginWindow)}
+		return true
+	}
+	b.count++
+	return b.count <= loginMaxAttempts
+}
+
+func mustBcrypt(pw string) []byte {
+	hash, err := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+	if err != nil {
+		log.Fatalf("auth: bcrypt failed: %v", err)
+	}
+	return hash
+}
+
+func randomPassword() string {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatalf("auth: random password generation failed: %v", err)
+	}
+	return hex.EncodeToString(b)
+}
+
+// ── Session store ─────────────────────────────────────────────────────────
 
 const sessionCookie = "dpai_session"
+const sessionTTL = 7 * 24 * time.Hour
 
 // AuthHandler handles login / logout / me.
-type AuthHandler struct{}
+// It uses the DB for session persistence so sessions survive server restarts.
+type AuthHandler struct {
+	db dbSession
+}
 
-func NewAuthHandler() *AuthHandler { return &AuthHandler{} }
+// dbSession is the subset of storage.Store that AuthHandler needs.
+// Using an interface keeps the handler testable without importing the full store.
+type dbSession interface {
+	CreateSession(token, username string, expiresAt time.Time) error
+	GetSession(token string) (username string, ok bool, err error)
+	DeleteSession(token string) error
+	PurgeExpiredSessions() error
+}
+
+func NewAuthHandler(db dbSession) *AuthHandler {
+	h := &AuthHandler{db: db}
+	// Background goroutine purges expired rows every 15 minutes.
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			_ = db.PurgeExpiredSessions()
+		}
+	}()
+	return h
+}
+
+func (h *AuthHandler) createSession(username string) (string, error) {
+	token := uuid.New().String()
+	return token, h.db.CreateSession(token, username, time.Now().Add(sessionTTL))
+}
+
+func (h *AuthHandler) getSession(token string) (string, bool) {
+	username, ok, _ := h.db.GetSession(token)
+	return username, ok
+}
+
+func (h *AuthHandler) deleteSession(token string) {
+	_ = h.db.DeleteSession(token)
+}
 
 // Login — POST /api/v1/auth/login
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
+	// Rate-limit by client IP before touching credentials.
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip == "" {
+		ip = r.RemoteAddr
+	}
+	if !loginAllowed(ip) {
+		w.Header().Set("Retry-After", "60")
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many login attempts — try again in 60 seconds"})
+		return
+	}
+
 	var body struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -77,20 +173,25 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	expected, ok := allowedUsers[body.Username]
-	if !ok || expected != hashPw(body.Password) {
+	hash, ok := allowedUsers[body.Username]
+	if !ok || bcrypt.CompareHashAndPassword(hash, []byte(body.Password)) != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid username or password"})
 		return
 	}
 
-	token := sessions.create(body.Username)
+	token, err := h.createSession(body.Username)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create session"})
+		return
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   true,
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   12 * 60 * 60, // 12 hours
+		MaxAge:   7 * 24 * 60 * 60, // 7 days
 	})
 	writeJSON(w, http.StatusOK, map[string]string{"username": body.Username})
 }
@@ -98,7 +199,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 // Logout — POST /api/v1/auth/logout
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
-		sessions.delete(c.Value)
+		h.deleteSession(c.Value)
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:   sessionCookie,
@@ -111,7 +212,7 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 
 // Me — GET /api/v1/auth/me
 func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
-	username, ok := usernameFromRequest(r)
+	username, ok := h.usernameFromRequest(r)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
 		return
@@ -119,10 +220,10 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"username": username})
 }
 
-// RequireAuth middleware — returns 401 if no valid session cookie.
-func RequireAuth(next http.Handler) http.Handler {
+// RequireAuth returns a middleware that rejects requests with no valid session.
+func (h *AuthHandler) RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := usernameFromRequest(r); !ok {
+		if _, ok := h.usernameFromRequest(r); !ok {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
 			return
 		}
@@ -130,10 +231,15 @@ func RequireAuth(next http.Handler) http.Handler {
 	})
 }
 
-func usernameFromRequest(r *http.Request) (string, bool) {
+func (h *AuthHandler) usernameFromRequest(r *http.Request) (string, bool) {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
 		return "", false
 	}
-	return sessions.get(c.Value)
+	return h.getSession(c.Value)
 }
+
+// RequireAuth is a package-level shim used by the router before the handler is
+// constructed. It is replaced at wire-up time — see router.go.
+// This variable is set by NewRouter so all middleware uses the same AuthHandler.
+var RequireAuth func(http.Handler) http.Handler

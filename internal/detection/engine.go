@@ -89,6 +89,8 @@ func computeAggregates(flows []FlowSummary) *AggregateStats {
 	agg.SIPOptionsPerSrcIP = make(map[string]int)
 	agg.SIPInvitePerSrcIP = make(map[string]int)
 	agg.DNSAnswerIPsPerDomain = make(map[string]map[string]bool)
+	agg.SYNOnlyFlowsPerSrcIP = make(map[string]int)
+	agg.ICMPFlowsPerSrcIP = make(map[string]int)
 
 	agg.TotalFlows = len(flows)
 
@@ -141,6 +143,19 @@ func computeAggregates(flows []FlowSummary) *AggregateStats {
 					agg.SIP401PerSrcIP[f.SrcIP]++
 				}
 			}
+		}
+
+		// --- Behavioral: DoS ---
+		if f.Type == "TCP" {
+			flags, _ := f.Metrics["tcp_flags"].(string)
+			// SYN-only: SYN seen but ACK never received → half-open connection (SYN flood)
+			if strings.Contains(flags, "SYN") && !strings.Contains(flags, "ACK") {
+				agg.SYNOnlyFlowsPerSrcIP[f.SrcIP]++
+			}
+		}
+		// ICMP flows: FlowID format is "flow-src:port-dst:port-PROTO"
+		if strings.HasSuffix(f.FlowID, "-ICMP") || strings.HasSuffix(f.FlowID, "-ICMPv6") {
+			agg.ICMPFlowsPerSrcIP[f.SrcIP]++
 		}
 
 		// --- Behavioral: DNS ---

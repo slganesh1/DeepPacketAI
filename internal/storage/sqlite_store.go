@@ -82,19 +82,70 @@ func (s *SQLiteStore) Close() error {
 	return s.db.Close()
 }
 
+// ── Session persistence ───────────────────────────────────────────────────────
+
+func (s *SQLiteStore) CreateSession(token, username string, expiresAt time.Time) error {
+	ctx, cancel := writeCtx()
+	defer cancel()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT OR REPLACE INTO sessions (token, username, expires_at) VALUES (?, ?, ?)`,
+		token, username, expiresAt.UTC().Format(time.RFC3339),
+	)
+	return err
+}
+
+func (s *SQLiteStore) GetSession(token string) (string, bool, error) {
+	ctx, cancel := queryCtx()
+	defer cancel()
+	var username, expiresStr string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT username, expires_at FROM sessions WHERE token = ?`, token,
+	).Scan(&username, &expiresStr)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	exp, err := time.Parse(time.RFC3339, expiresStr)
+	if err != nil || time.Now().After(exp) {
+		return "", false, nil
+	}
+	return username, true, nil
+}
+
+func (s *SQLiteStore) DeleteSession(token string) error {
+	ctx, cancel := writeCtx()
+	defer cancel()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token = ?`, token)
+	return err
+}
+
+func (s *SQLiteStore) PurgeExpiredSessions() error {
+	ctx, cancel := writeCtx()
+	defer cancel()
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM sessions WHERE expires_at < ?`, time.Now().UTC().Format(time.RFC3339),
+	)
+	return err
+}
+
 // DB returns the underlying sql.DB for direct queries.
 func (s *SQLiteStore) DB() *sql.DB {
 	return s.db
 }
 
-func (s *SQLiteStore) CreateJob(jobID int64, pcap string) error {
+func (s *SQLiteStore) CreateJob(pcap string) (int64, error) {
 	ctx, cancel := writeCtx()
 	defer cancel()
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO jobs (id, pcap_path, status, started_at) VALUES (?, ?, 'running', datetime('now'))`,
-		jobID, pcap,
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO jobs (pcap_path, status, started_at) VALUES (?, 'running', datetime('now'))`,
+		pcap,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
 }
 
 func (s *SQLiteStore) FailJob(jobID int64, reason string) error {
@@ -114,6 +165,61 @@ func (s *SQLiteStore) CompleteJob(jobID int64) error {
 		`UPDATE jobs SET status='completed', completed_at=datetime('now') WHERE id=?`,
 		jobID,
 	)
+	return err
+}
+
+// ResetStaleJobs marks any jobs still in "running" state as "failed".
+// Called on startup to clean up jobs that were interrupted by a server restart.
+func (s *SQLiteStore) ResetStaleJobs() {
+	ctx, cancel := writeCtx()
+	defer cancel()
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE jobs SET status='failed', error='interrupted by server restart' WHERE status='running'`)
+	if err != nil {
+		log.Printf("ResetStaleJobs: %v", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("ResetStaleJobs: reset %d stale job(s) to failed", n)
+	}
+}
+
+// DeleteJob removes a job and all its associated data permanently.
+// All deletes run inside a single transaction so a crash mid-way does not
+// leave orphaned rows.
+func (s *SQLiteStore) DeleteJob(jobID int64) error {
+	ctx, cancel := writeCtx()
+	defer cancel()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("DeleteJob begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	tables := []string{
+		"packets", "flows", "calls", "rtp_legs",
+		"protocol_events", "telecom_sessions", "traffic_stats",
+	}
+	for _, t := range tables {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE job_id = ?", t), jobID); err != nil {
+			log.Printf("DeleteJob: skipping table %s: %v", t, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM jobs WHERE id = ?", jobID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// PurgeAllPackets deletes all raw packet rows across all jobs.
+// Flows, events, calls, and job metadata are preserved.
+// This is the most effective way to reclaim disk space after large PCAP uploads.
+func (s *SQLiteStore) PurgeAllPackets() error {
+	ctx, cancel := writeCtx()
+	defer cancel()
+	if _, err := s.db.ExecContext(ctx, "DELETE FROM packets"); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, "VACUUM")
 	return err
 }
 

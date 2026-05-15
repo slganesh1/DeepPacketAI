@@ -1,8 +1,10 @@
 package web
 
 import (
+	"encoding/json"
 	"io/fs"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"DeepPacketAI/internal/geoip"
 	"DeepPacketAI/internal/metrics"
 	"DeepPacketAI/internal/storage"
+	"DeepPacketAI/internal/stream"
 	"DeepPacketAI/internal/web/handlers"
 	"DeepPacketAI/internal/ws"
 
@@ -22,14 +25,22 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiRegistry *ai.ProviderRegistry, dispatcher *alerting.Dispatcher, geoEnricher *geoip.Enricher, uiAssets fs.FS, uploadsDir string) http.Handler {
+func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiRegistry *ai.ProviderRegistry, dispatcher *alerting.Dispatcher, geoEnricher *geoip.Enricher, agentRegistry *stream.AgentRegistry, uiAssets fs.FS, uploadsDir string) http.Handler {
 	r := chi.NewRouter()
 
 	// ---- CORS ----
 	allowedOrigins := []string{
 		"http://localhost:5173", // local dev (vite)
 		"http://localhost:8080", // embedded UI (installer mode)
-		"https://64.227.168.88", // production (HTTPS via Nginx)
+	}
+	// DPAI_ALLOWED_ORIGINS is a comma-separated list of additional origins
+	// (e.g. "https://app.example.com,https://64.227.168.88").
+	if extra := os.Getenv("DPAI_ALLOWED_ORIGINS"); extra != "" {
+		for _, o := range strings.Split(extra, ",") {
+			if o = strings.TrimSpace(o); o != "" {
+				allowedOrigins = append(allowedOrigins, o)
+			}
+		}
 	}
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   allowedOrigins,
@@ -39,7 +50,12 @@ func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiR
 		MaxAge:           300,
 	}))
 
+	// Propagate the same allowed-origins list into the WebSocket upgrader so
+	// it rejects cross-origin upgrade attempts just like CORS does for REST.
+	hub.SetAllowedOrigins(allowedOrigins)
+
 	// ---- Middlewares ----
+	r.Use(middleware.RequestID) // injects X-Request-Id header into every request
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(prometheusMiddleware)
@@ -66,13 +82,38 @@ func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiR
 	geoHandler := handlers.NewGeoHandler(db, geoEnricher)
 	pluginHandler := handlers.NewPluginHandler(aiRegistry)
 	reportHandler := handlers.NewReportHandler(db)
-	authHandler := handlers.NewAuthHandler()
+	authHandler := handlers.NewAuthHandler(db)
+	// Wire the package-level RequireAuth shim so all middleware references
+	// the same handler instance (and therefore the same DB session store).
+	handlers.RequireAuth = authHandler.RequireAuth
+	agentHandler := handlers.NewAgentHandler(agentRegistry)
+
+	// ---- Health / readiness (unauthenticated — for load balancers and k8s) ----
+	startTime := time.Now()
+	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":   "ok",
+			"uptime_s": int(time.Since(startTime).Seconds()),
+		})
+	})
+	r.Get("/ready", func(w http.ResponseWriter, r *http.Request) {
+		// Probe the DB: if it can list jobs it is reachable.
+		if _, err := db.ListJobs(1, ""); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"status": "unavailable", "error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ready"})
+	})
 
 	// ---- Prometheus metrics scrape endpoint ----
 	r.Get("/metrics", promhttp.Handler().ServeHTTP)
 
-	// ---- WebSocket ----
-	r.Get("/ws", hub.HandleWS)
+	// ---- WebSocket (requires valid session cookie) ----
+	r.With(handlers.RequireAuth).Get("/ws", hub.HandleWS)
 
 	// ---- API v1 ----
 	r.Route("/api/v1", func(r chi.Router) {
@@ -100,12 +141,18 @@ func NewRouter(db storage.Store, hub *ws.Hub, captureEngine *capture.Engine, aiR
 		// Upload & Reprocess
 		r.Post("/jobs/upload", uploadHandler.UploadPCAP)
 		r.Post("/jobs/{id}/reprocess", uploadHandler.ReprocessJob)
+		r.Delete("/jobs/packets", jobHandler.PurgePackets)
+		r.Delete("/jobs/{id}", jobHandler.DeleteJob)
 
 		// Entities
 		r.Get("/entities", entityHandler.ListEntities)
 		r.Get("/entities/{id}", entityDetailHandler.GetEntity)
 		r.Get("/entities/{id}/events", entityEventHandler.ListEntityEvents)
 		r.Get("/entities/{id}/metrics", entityMetricsHandler.GetEntityMetrics)
+
+		// Agents (connected capture nodes in central mode)
+		r.Get("/agents", agentHandler.ListAgents)
+		r.Put("/agents/{id}/filter", agentHandler.UpdateFilter)
 
 		// Capture
 		r.Get("/capture/interfaces", captureHandler.ListInterfaces)

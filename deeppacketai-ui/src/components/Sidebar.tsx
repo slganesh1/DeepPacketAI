@@ -15,12 +15,14 @@ import {
   ShieldAlert,
   Gauge,
   Puzzle,
+  Network,
 } from "lucide-react";
 import { clsx } from "clsx";
 
 const navItems = [
   { to: "/", icon: LayoutDashboard, label: "Dashboard" },
   { to: "/capture", icon: Radio, label: "Live Capture" },
+  { to: "/agents", icon: Network, label: "Capture Agents" },
   { to: "/packets", icon: List, label: "Packets" },
   { to: "/jobs", icon: Briefcase, label: "Jobs" },
   { to: "/alerts", icon: AlertTriangle, label: "Alerts" },

@@ -20,6 +20,7 @@ import PluginsPage from "./pages/PluginsPage";
 import AlertingPage from "./pages/AlertingPage";
 import DetectionRulesPage from "./pages/DetectionRulesPage";
 import GeoPage from "./pages/GeoPage";
+import AgentsPage from "./pages/AgentsPage";
 
 export default function App() {
   const [authUser, setAuthUser] = useState<string | null>(null);
@@ -71,6 +72,7 @@ export default function App() {
           <Route path="/alerting" element={<AlertingPage />} />
           <Route path="/detection-rules" element={<DetectionRulesPage />} />
           <Route path="/geo" element={<GeoPage />} />
+          <Route path="/agents" element={<AgentsPage />} />
         </Routes>
       </AppLayout>
     </BrowserRouter>

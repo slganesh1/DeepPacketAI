@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Trash2 } from "lucide-react";
 import { fetchJobs, fetchJobSummary } from "../api/jobs";
 import type { Job, JobSummary } from "../api/jobs";
+import { api } from "../api/client";
 
 export default function JobsPage() {
   const navigate = useNavigate();
@@ -10,12 +12,18 @@ export default function JobsPage() {
   const [summaries, setSummaries] = useState<Record<number, JobSummary>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
+  const [confirmId, setConfirmId] = useState<number | null>(null);
 
   useEffect(() => {
+    loadJobs();
+  }, []);
+
+  function loadJobs() {
+    setLoading(true);
     fetchJobs()
       .then((data) => {
         setJobs(data);
-        // Fetch summaries for each job in parallel
         const promises = data.map((job) =>
           fetchJobSummary(job.job_id)
             .then((summary) => ({ id: job.job_id, summary }))
@@ -31,17 +39,24 @@ export default function JobsPage() {
       })
       .catch(() => setError("Failed to load jobs"))
       .finally(() => setLoading(false));
-  }, []);
-
-  if (error) {
-    return <div className="p-6 text-red-400">{error}</div>;
   }
 
-  if (loading) {
-    return (
-      <div className="p-6 text-slate-400 animate-pulse">Loading jobs...</div>
-    );
+  async function handleDelete(jobId: number) {
+    setDeletingId(jobId);
+    setConfirmId(null);
+    try {
+      await api.delete(`/jobs/${jobId}`);
+      setJobs((prev) => prev.filter((j) => j.job_id !== jobId));
+      setSummaries((prev) => { const n = { ...prev }; delete n[jobId]; return n; });
+    } catch {
+      // ignore
+    } finally {
+      setDeletingId(null);
+    }
   }
+
+  if (error) return <div className="p-6 text-red-400">{error}</div>;
+  if (loading) return <div className="p-6 text-slate-400 animate-pulse">Loading jobs...</div>;
 
   const completed = jobs.filter((j) => j.status === "completed").length;
   const failed = jobs.filter((j) => j.status === "failed").length;
@@ -51,9 +66,7 @@ export default function JobsPage() {
     <div className="space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-white">PCAP Jobs</h1>
-        <p className="text-sm text-slate-400 mt-1">
-          Upload analysis results and capture sessions
-        </p>
+        <p className="text-sm text-slate-400 mt-1">Upload analysis results and capture sessions</p>
       </div>
 
       {/* Summary Cards */}
@@ -64,11 +77,35 @@ export default function JobsPage() {
         <SummaryCard label="Active" value={active} color="text-amber-400" />
       </div>
 
+      {/* Confirm delete dialog */}
+      {confirmId !== null && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-slate-800 border border-slate-700 rounded-xl p-6 w-full max-w-sm shadow-xl">
+            <h3 className="text-base font-semibold text-white mb-2">Delete Job #{confirmId}?</h3>
+            <p className="text-sm text-slate-400 mb-5">
+              This will permanently delete the job and all its packets, flows, events, and sessions. This cannot be undone.
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                onClick={() => setConfirmId(null)}
+                className="px-4 py-2 text-sm text-slate-300 hover:text-white bg-slate-700 hover:bg-slate-600 rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleDelete(confirmId)}
+                className="px-4 py-2 text-sm text-white bg-red-600 hover:bg-red-500 rounded-lg transition-colors"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Job Cards */}
       {jobs.length === 0 ? (
-        <div className="text-slate-500 text-center py-12">
-          No jobs found. Upload a PCAP to get started.
-        </div>
+        <div className="text-slate-500 text-center py-12">No jobs found. Upload a PCAP to get started.</div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
           {jobs.map((job) => {
@@ -78,6 +115,8 @@ export default function JobsPage() {
                 key={job.job_id}
                 job={job}
                 summary={summary}
+                deleting={deletingId === job.job_id}
+                onDelete={(e) => { e.stopPropagation(); setConfirmId(job.job_id); }}
                 onClick={() => navigate(`/jobs/${job.job_id}`)}
               />
             );
@@ -105,7 +144,6 @@ function StatusBadge({ status }: { status: string }) {
     pending: { bg: "bg-slate-500/20", text: "text-slate-400" },
   };
   const c = config[status] || config.pending;
-
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${c.bg} ${c.text}`}>
       {status === "running" && (
@@ -118,7 +156,6 @@ function StatusBadge({ status }: { status: string }) {
 
 function pcapName(path: string): string {
   if (!path) return "Unknown source";
-  // Extract filename from path
   const parts = path.replace(/\\/g, "/").split("/");
   return parts[parts.length - 1] || path;
 }
@@ -136,10 +173,14 @@ function formatDuration(startedAt: string, completedAt?: string): string {
 function JobCard({
   job,
   summary,
+  deleting,
+  onDelete,
   onClick,
 }: {
   job: Job;
   summary?: JobSummary;
+  deleting: boolean;
+  onDelete: (e: React.MouseEvent) => void;
   onClick: () => void;
 }) {
   return (
@@ -155,7 +196,21 @@ function JobCard({
           </h3>
           <p className="text-xs text-slate-500 mt-0.5">Job #{job.job_id}</p>
         </div>
-        <StatusBadge status={job.status} />
+        <div className="flex items-center gap-2 flex-shrink-0 ml-2">
+          <StatusBadge status={job.status} />
+          <button
+            onClick={onDelete}
+            disabled={deleting}
+            title="Delete job"
+            className="p-1 text-slate-600 hover:text-red-400 transition-colors disabled:opacity-40"
+          >
+            {deleting ? (
+              <span className="w-3.5 h-3.5 border border-slate-500 border-t-transparent rounded-full animate-spin inline-block" />
+            ) : (
+              <Trash2 className="w-3.5 h-3.5" />
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Time info */}
@@ -171,10 +226,7 @@ function JobCard({
           <MiniStat label="Flows" value={summary.total_flows} />
           <MiniStat label="Calls" value={summary.total_calls} />
           <MiniStat label="Events" value={summary.total_events} />
-          <MiniStat
-            label="Avg MOS"
-            value={summary.avg_mos > 0 ? summary.avg_mos.toFixed(2) : "-"}
-          />
+          <MiniStat label="Avg MOS" value={summary.avg_mos > 0 ? summary.avg_mos.toFixed(2) : "-"} />
         </div>
       ) : (
         <div className="grid grid-cols-4 gap-2">
@@ -184,11 +236,8 @@ function JobCard({
         </div>
       )}
 
-      {/* Error message */}
       {job.error && (
-        <p className="text-xs text-red-400 mt-3 truncate" title={job.error}>
-          {job.error}
-        </p>
+        <p className="text-xs text-red-400 mt-3 truncate" title={job.error}>{job.error}</p>
       )}
     </div>
   );

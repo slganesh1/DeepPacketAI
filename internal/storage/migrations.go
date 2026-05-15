@@ -304,6 +304,18 @@ var migrations = []migration{
 		CREATE INDEX IF NOT EXISTS idx_ip_enrichments_country ON ip_enrichments(country_code);
 		`,
 	},
+	{
+		version: 8,
+		sql: `
+		-- Persistent login sessions (version 8)
+		CREATE TABLE IF NOT EXISTS sessions (
+			token      TEXT PRIMARY KEY,
+			username   TEXT NOT NULL,
+			expires_at TEXT NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+		`,
+	},
 }
 
 // runMigrations creates the schema_version table if needed, then applies

@@ -10,28 +10,49 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
-
 // Hub manages all WebSocket clients and broadcasts messages.
 type Hub struct {
-	clients    map[*Client]bool
-	broadcast  chan []byte
-	register   chan *Client
-	unregister chan *Client
-	mu         sync.RWMutex
-	OnCommand  func(c *Client, cmd *ClientCommand)
+	clients        map[*Client]bool
+	broadcast      chan []byte
+	register       chan *Client
+	unregister     chan *Client
+	mu             sync.RWMutex
+	OnCommand      func(c *Client, cmd *ClientCommand)
+	allowedOrigins map[string]bool // set via SetAllowedOrigins
 }
 
 // NewHub creates a new WebSocket hub.
 func NewHub() *Hub {
 	return &Hub{
 		clients:    make(map[*Client]bool),
-		broadcast:  make(chan []byte, 256),
+		broadcast:  make(chan []byte, 8192),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 	}
+}
+
+// SetAllowedOrigins configures which HTTP origins may upgrade to WebSocket.
+// If never called (or called with an empty slice), all origins are allowed
+// (development fallback).
+func (h *Hub) SetAllowedOrigins(origins []string) {
+	m := make(map[string]bool, len(origins))
+	for _, o := range origins {
+		m[o] = true
+	}
+	h.mu.Lock()
+	h.allowedOrigins = m
+	h.mu.Unlock()
+}
+
+func (h *Hub) checkOrigin(r *http.Request) bool {
+	h.mu.RLock()
+	allowed := h.allowedOrigins
+	h.mu.RUnlock()
+	if len(allowed) == 0 {
+		return true // development mode: no restriction
+	}
+	origin := r.Header.Get("Origin")
+	return allowed[origin]
 }
 
 // Run starts the hub event loop. Call in a goroutine.
@@ -58,7 +79,7 @@ func (h *Hub) Run() {
 			log.Printf("ws client disconnected (%d total)", count)
 
 		case message := <-h.broadcast:
-			h.mu.RLock()
+			h.mu.Lock()
 			for client := range h.clients {
 				select {
 				case client.send <- message:
@@ -67,19 +88,25 @@ func (h *Hub) Run() {
 					delete(h.clients, client)
 				}
 			}
-			h.mu.RUnlock()
+			h.mu.Unlock()
 		}
 	}
 }
 
 // Broadcast sends a message to all connected clients.
+// Non-blocking: drops the message silently if the broadcast channel is full
+// so that a slow or absent UI client never back-pressures the capture path.
 func (h *Hub) Broadcast(msg Message) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		log.Printf("ws broadcast marshal error: %v", err)
 		return
 	}
-	h.broadcast <- data
+	select {
+	case h.broadcast <- data:
+	default:
+		// channel full — drop rather than block the capture goroutine
+	}
 }
 
 // ClientCount returns the number of connected clients.
@@ -90,7 +117,10 @@ func (h *Hub) ClientCount() int {
 }
 
 // HandleWS is the HTTP handler for WebSocket upgrade.
+// Auth is enforced at the router level via RequireAuth middleware before this
+// handler is reached. Origin is validated here against SetAllowedOrigins.
 func (h *Hub) HandleWS(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{CheckOrigin: h.checkOrigin}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("ws upgrade error: %v", err)

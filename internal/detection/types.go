@@ -79,6 +79,10 @@ type AggregateStats struct {
 	SIPOptionsPerSrcIP  map[string]int // for OPTIONS scanning detection
 	SIPInvitePerSrcIP   map[string]int // for INVITE flood / toll fraud detection
 
+	// Behavioral — DoS
+	SYNOnlyFlowsPerSrcIP map[string]int // TCP flows with SYN but no ACK (half-open, SYN flood indicator)
+	ICMPFlowsPerSrcIP    map[string]int // ICMP/ICMPv6 flows per source IP
+
 	// Behavioral — DNS
 	DNSQueryCounts       map[string]int
 	DNSAnswerIPsPerDomain map[string]map[string]bool // domain → set of resolved IPs (fast-flux)

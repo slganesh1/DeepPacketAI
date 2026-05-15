@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
 
 	"DeepPacketAI/internal/capture"
@@ -13,7 +15,6 @@ import (
 )
 
 // listInterfaces prints all available network interfaces and exits.
-// Useful on Windows where pcap device names differ from friendly display names.
 func listInterfaces() {
 	ifaces, err := capture.ListInterfaces()
 	if err != nil {
@@ -35,69 +36,104 @@ func listInterfaces() {
 	fmt.Println("On Windows, friendly names like 'Ethernet' are also accepted and auto-resolved.")
 }
 
-// runAgent starts a lightweight capture-only agent that streams all packets to
-// a central DeepPacketAI node for analysis. No database, no UI, no AI — just
-// capture and stream.
+// AgentFlags holds all agent-mode configuration parsed from CLI flags.
+type AgentFlags struct {
+	Ifaces      string  // comma-separated interface list
+	BPFFilter   string
+	CentralAddr string
+	AgentID     string
+	Token       string
+	UseTLS      bool
+	TLSSkipVfy  bool
+	TLSCA       string
+	MaxMbps     float64
+}
+
+// runAgent starts one AgentStreamer per interface and streams all packets to
+// a central DeepPacketAI node. Supports:
+//   - Multiple interfaces (comma-separated --iface)
+//   - TLS + token authentication
+//   - Outbound bandwidth throttling
+//   - BPF filter hot-swap (initiated by central)
 //
 // Usage:
 //
-//	deeppacketai --mode=agent --iface=eth0 --central=192.168.1.10:9090
-//	deeppacketai --mode=agent --iface=eth0 --filter="port 5060" --central=192.168.1.10:9090
-func runAgent(iface, bpfFilter, centralAddr, agentID string) {
-	if centralAddr == "" {
+//	deeppacketai --mode=agent --iface=eth0,eth1 --central=192.168.1.10:9090
+//	deeppacketai --mode=agent --iface=eth0 --filter="port 5060" --token=secret --tls --central=host:9090
+func runAgent(f AgentFlags) {
+	if f.CentralAddr == "" {
 		log.Fatal("agent mode: --central <host:port> is required")
 	}
-	if iface == "" {
-		log.Fatal("agent mode: --iface <interface> is required")
-	}
-	if agentID == "" {
-		host, _ := os.Hostname()
-		agentID = host + "-" + iface
+	if f.Ifaces == "" {
+		log.Fatal("agent mode: --iface <interface[,interface...]> is required")
 	}
 
 	hostname, _ := os.Hostname()
 
-	// Resolve Windows-friendly names (e.g. "Ethernet") to pcap device names
-	resolvedIface := capture.ResolveInterfaceName(iface)
-	if resolvedIface != iface {
-		log.Printf("agent: resolved interface %q → %q", iface, resolvedIface)
+	agentCfg := stream.AgentConfig{
+		Token:         f.Token,
+		UseTLS:        f.UseTLS,
+		TLSSkipVerify: f.TLSSkipVfy,
+		TLSCA:         f.TLSCA,
+		MaxMbps:       f.MaxMbps,
 	}
 
-	log.Printf("agent: id=%s iface=%s filter=%q central=%s", agentID, resolvedIface, bpfFilter, centralAddr)
+	capCfg := capture.DefaultCaptureConfig()
+	factory := capture.NewSourceFactory(capCfg)
+	normalizedFilter := capture.NormalizeBPFFilter(f.BPFFilter)
 
-	cfg := capture.DefaultCaptureConfig()
-	factory := capture.NewSourceFactory(cfg)
-
-	normalizedFilter := capture.NormalizeBPFFilter(bpfFilter)
-	sources, err := factory.CreateSources(resolvedIface, normalizedFilter, 1, cfg)
-	if err != nil {
-		log.Printf("agent: failed to open interface %q: %v", resolvedIface, err)
-		log.Println()
-		log.Println("Run with --list-interfaces to see all available interface names.")
-		os.Exit(1)
-	}
-	defer sources[0].Close()
-
-	info := stream.AgentInfo{
-		ID:        agentID,
-		Hostname:  hostname,
-		Interface: iface,
-	}
+	// Split comma-separated interface list.
+	ifaces := strings.Split(f.Ifaces, ",")
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	streamer := stream.NewAgentStreamer(info, sources[0], centralAddr)
-	log.Printf("agent: streaming packets to central %s", centralAddr)
-	streamer.Run(ctx)
-	log.Println("agent: stopped")
+	var wg sync.WaitGroup
+	for _, raw := range ifaces {
+		iface := strings.TrimSpace(raw)
+		if iface == "" {
+			continue
+		}
+		resolved := capture.ResolveInterfaceName(iface)
+		if resolved != iface {
+			log.Printf("agent: resolved interface %q → %q", iface, resolved)
+		}
+
+		agentID := f.AgentID
+		if agentID == "" {
+			agentID = hostname + "-" + iface
+		} else if len(ifaces) > 1 {
+			agentID = agentID + "-" + iface // make ID unique per interface
+		}
+
+		info := stream.AgentInfo{
+			ID:        agentID,
+			Hostname:  hostname,
+			Interface: resolved,
+		}
+
+		streamer := stream.NewAgentStreamer(info, factory, capCfg, normalizedFilter, f.CentralAddr, agentCfg)
+
+		log.Printf("agent: id=%s iface=%s filter=%q central=%s tls=%v maxMbps=%.1f",
+			agentID, resolved, normalizedFilter, f.CentralAddr, f.UseTLS, f.MaxMbps)
+
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			streamer.Run(ctx)
+		}()
+	}
+
+	wg.Wait()
+	log.Println("agent: all interfaces stopped")
 }
 
 // startCentralReceiver starts the TCP listener that receives agent streams.
-// It is called alongside the normal HTTP server in central mode.
-func startCentralReceiver(streamAddr string, engine *capture.Engine) {
-	receiver := stream.NewCentralReceiver(engine)
-	if err := receiver.Listen(streamAddr); err != nil {
+// Returns the AgentRegistry so the web server can expose it via /api/v1/agents.
+func startCentralReceiver(ctx context.Context, streamAddr string, engine *capture.Engine, cfg stream.CentralConfig) *stream.AgentRegistry {
+	receiver := stream.NewCentralReceiver(engine, cfg)
+	if err := receiver.Listen(ctx, streamAddr); err != nil {
 		log.Fatalf("central: failed to start stream receiver on %s: %v", streamAddr, err)
 	}
+	return receiver.Registry()
 }
