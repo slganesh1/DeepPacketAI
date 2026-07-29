@@ -114,13 +114,18 @@ func processPacket(packet gopacket.Packet, frameNum uint64, rawData []byte, hand
 	}
 
 	var srcIP, dstIP string
+	var ttl uint8
+	var ipID uint16
 	switch ip := net.(type) {
 	case *layers.IPv4:
 		srcIP = ip.SrcIP.String()
 		dstIP = ip.DstIP.String()
+		ttl = ip.TTL
+		ipID = ip.Id
 	case *layers.IPv6:
 		srcIP = ip.SrcIP.String()
 		dstIP = ip.DstIP.String()
+		ttl = ip.HopLimit // IPv6 has no base-header identification field; ipID stays 0
 	default:
 		return nil
 	}
@@ -190,6 +195,8 @@ func processPacket(packet gopacket.Packet, frameNum uint64, rawData []byte, hand
 		TCPSeq:      tcpSeq,
 		TCPAck:      tcpAck,
 		TCPFlags:    tcpFlags,
+		TTL:         ttl,
+		IPID:        ipID,
 	}
 
 	return handler(p)

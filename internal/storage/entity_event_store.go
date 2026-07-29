@@ -2,7 +2,6 @@ package storage
 
 import (
 	"encoding/json"
-	"time"
 
 	"DeepPacketAI/internal/web/api"
 )
@@ -41,7 +40,7 @@ func (s *SQLiteStore) GetEventsForCall(callID string) ([]api.TimelineEvent, erro
 			return nil, err
 		}
 
-		ts, _ := time.Parse(time.RFC3339, startStr)
+		ts := parseSQLiteTime(startStr)
 
 		var m map[string]any
 		_ = json.Unmarshal([]byte(metrics), &m)

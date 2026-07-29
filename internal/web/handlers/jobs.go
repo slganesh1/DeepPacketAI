@@ -616,6 +616,73 @@ func buildJobContextString(flows []domain.Flow, calls []domain.Call, events []st
 		sb.WriteString("\n")
 	}
 
+	// AJP Flows — decoder stores: method, protocol, req_uri, server_name, server_port,
+	// remote_addr, is_ssl, content_type, content_length, soap_action, status_code,
+	// status_message, reuse_connection, is_error
+	if ajpFlows, ok := flowsByType[domain.FlowAJP]; ok && len(ajpFlows) > 0 {
+		sb.WriteString("## AJP Flows\n")
+		for _, f := range ajpFlows {
+			sb.WriteString(fmt.Sprintf("- Flow %s | %s -> %s", f.FlowID, f.SrcIP, f.DstIP))
+			if method, ok := f.Metrics["method"].(string); ok && method != "" {
+				sb.WriteString(fmt.Sprintf(" | Method: %s", method))
+			}
+			if uri, ok := f.Metrics["req_uri"].(string); ok && uri != "" {
+				sb.WriteString(fmt.Sprintf(" | URI: %s", uri))
+			}
+			if server, ok := f.Metrics["server_name"].(string); ok && server != "" {
+				sb.WriteString(fmt.Sprintf(" | ServerName: %s", server))
+			}
+			if remote, ok := f.Metrics["remote_addr"].(string); ok && remote != "" {
+				sb.WriteString(fmt.Sprintf(" | RemoteAddr: %s", remote))
+			}
+			if soapAction, ok := f.Metrics["soap_action"].(string); ok && soapAction != "" {
+				sb.WriteString(fmt.Sprintf(" | SOAPAction: %s", soapAction))
+			}
+			if ct, ok := f.Metrics["content_type"].(string); ok && ct != "" {
+				sb.WriteString(fmt.Sprintf(" | ContentType: %s", ct))
+			}
+			if status, ok := f.Metrics["status_code"]; ok {
+				sb.WriteString(fmt.Sprintf(" | Status: %v", status))
+			}
+			if isErr, ok := f.Metrics["is_error"].(bool); ok && isErr {
+				sb.WriteString(" | ERROR")
+			}
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	// SNMP Flows — decoder stores: version, community, pdu_type, is_error, error_status,
+	// error_index, request_id, varbind_count, oids, values, enterprise_oid, agent_addr,
+	// generic_trap, specific_trap
+	if snmpFlows, ok := flowsByType[domain.FlowSNMP]; ok && len(snmpFlows) > 0 {
+		sb.WriteString("## SNMP Flows\n")
+		for _, f := range snmpFlows {
+			sb.WriteString(fmt.Sprintf("- Flow %s | %s -> %s", f.FlowID, f.SrcIP, f.DstIP))
+			if version, ok := f.Metrics["version"].(string); ok && version != "" {
+				sb.WriteString(fmt.Sprintf(" | Version: %s", version))
+			}
+			if pduType, ok := f.Metrics["pdu_type"].(string); ok && pduType != "" {
+				sb.WriteString(fmt.Sprintf(" | PDU: %s", pduType))
+			}
+			if community, ok := f.Metrics["community"].(string); ok && community != "" {
+				sb.WriteString(fmt.Sprintf(" | Community: %s", community))
+			}
+			if oids, ok := f.Metrics["oids"]; ok {
+				sb.WriteString(fmt.Sprintf(" | OIDs: %v", oids))
+			}
+			if genTrap, ok := f.Metrics["generic_trap"].(string); ok && genTrap != "" {
+				sb.WriteString(fmt.Sprintf(" | Trap: %s", genTrap))
+			}
+			if isErr, ok := f.Metrics["is_error"].(bool); ok && isErr {
+				errStatus, _ := f.Metrics["error_status"].(string)
+				sb.WriteString(fmt.Sprintf(" | ERROR: %s", errStatus))
+			}
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+
 	// S1AP Flows — decoder stores: pdu_type, procedure_code, procedure_name
 	if s1apFlows, ok := flowsByType[domain.FlowS1AP]; ok && len(s1apFlows) > 0 {
 		sb.WriteString("## S1AP Flows\n")

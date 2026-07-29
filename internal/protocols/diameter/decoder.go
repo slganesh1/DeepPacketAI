@@ -113,9 +113,11 @@ func (d *Decoder) Flush() []domain.Flow {
 		}
 
 		flows = append(flows, domain.Flow{
-			FlowID:  fmt.Sprintf("diameter-%s-%s-%d", msg.SessionID, direction, msg.Header.EndToEndID),
-			Type:    domain.FlowDiameter,
-			Metrics: metrics,
+			FlowID:    fmt.Sprintf("diameter-%s-%s-%d", msg.SessionID, direction, msg.Header.EndToEndID),
+			Type:      domain.FlowDiameter,
+			StartTime: msg.Timestamp,
+			EndTime:   msg.Timestamp,
+			Metrics:   metrics,
 		})
 	}
 
@@ -164,6 +166,7 @@ func (d *Decoder) parseDiameter(pkt *domain.Packet) *DiameterMessage {
 	}
 
 	msg := &DiameterMessage{
+		Timestamp:   pkt.Timestamp,
 		Header:      hdr,
 		CommandName: cmdName,
 		AppName:     appName,

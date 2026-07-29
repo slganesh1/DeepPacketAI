@@ -3,6 +3,7 @@ package ngap
 import (
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"DeepPacketAI/internal/domain"
 	"DeepPacketAI/internal/protocols"
@@ -65,6 +66,7 @@ type ngapRecord struct {
 	DstPort       uint16
 	FrameNum      uint64
 	IMSI          string
+	Timestamp     time.Time
 }
 
 func NewDecoder() *Decoder {
@@ -135,13 +137,15 @@ func (d *Decoder) Flush() []domain.Flow {
 		}
 
 		flows = append(flows, domain.Flow{
-			FlowID:  fmt.Sprintf("ngap-%s-%d-%d", rec.ProcedureName, rec.ProcedureCode, rec.FrameNum),
-			Type:    domain.FlowNGAP,
-			SrcIP:   rec.SrcIP,
-			DstIP:   rec.DstIP,
-			SrcPort: rec.SrcPort,
-			DstPort: rec.DstPort,
-			Metrics: metrics,
+			FlowID:    fmt.Sprintf("ngap-%s-%d-%d", rec.ProcedureName, rec.ProcedureCode, rec.FrameNum),
+			Type:      domain.FlowNGAP,
+			SrcIP:     rec.SrcIP,
+			DstIP:     rec.DstIP,
+			SrcPort:   rec.SrcPort,
+			DstPort:   rec.DstPort,
+			StartTime: rec.Timestamp,
+			EndTime:   rec.Timestamp,
+			Metrics:   metrics,
 		})
 	}
 	return flows
@@ -197,6 +201,7 @@ func (d *Decoder) parseNGAP(pkt *domain.Packet) *ngapRecord {
 		DstPort:       pkt.DstPort,
 		FrameNum:      pkt.FrameNumber,
 		IMSI:          imsi,
+		Timestamp:     pkt.Timestamp,
 	}
 
 	pkt.AppProtocol = "NGAP"

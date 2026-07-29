@@ -35,6 +35,14 @@ const (
 	flagURG uint16 = 0x20
 )
 
+// rstTTLSuspiciousDelta is the minimum |baseline_TTL - RST_TTL| gap treated as
+// evidence the RST didn't originate from the same network path as the rest of
+// the flow. Ordinary route noise (ECMP, minor path changes) moves TTL by 1-2
+// hops at most; an off-path injector (middlebox, IDS reset, censorship
+// infrastructure) is typically many hops closer or farther and produces a
+// much larger, consistent gap.
+const rstTTLSuspiciousDelta = 5
+
 // Tracker accumulates per-flow state and emits domain.Flow records on Flush().
 // Not safe for concurrent use — intended for single-worker pipelines.
 type Tracker struct {
@@ -56,6 +64,20 @@ type flowKey struct {
 }
 
 func makeKey(srcIP, dstIP string, srcPort, dstPort uint16, proto string) (flowKey, bool) {
+	if proto == "ICMP" || proto == "ICMPv6" {
+		// pcap/reader.go maps ICMP Type/Code onto SrcPort/DstPort as a port
+		// stand-in, but unlike a real TCP/UDP port pair it isn't symmetric
+		// across a conversation: an echo request reads Type=8 (srcPort=8,
+		// dstPort=0) while its reply reads Type=0 (srcPort=0, dstPort=8) —
+		// the exact reverse. Keying on those "ports" the same way as TCP/UDP
+		// would put the request and its own reply in two different flow
+		// buckets instead of one. ICMP has no real per-conversation port, so
+		// the key is just the IP pair.
+		if srcIP < dstIP {
+			return flowKey{srcIP, dstIP, 0, 0, proto}, false
+		}
+		return flowKey{dstIP, srcIP, 0, 0, proto}, true
+	}
 	if srcIP < dstIP || (srcIP == dstIP && srcPort <= dstPort) {
 		return flowKey{srcIP, dstIP, srcPort, dstPort, proto}, false
 	}
@@ -109,14 +131,34 @@ type flowRecord struct {
 	fwdRetrans, revRetrans int64
 
 	// Data RTT samples (PSH → ACK)
-	fwdPending  []pendingSeg
-	revPending  []pendingSeg
-	rttSamples  []rttMeasurement // all measured data-RTT samples with timestamps
+	fwdPending []pendingSeg
+	revPending []pendingSeg
+	rttSamples []rttMeasurement // all measured data-RTT samples with timestamps
+
+	// RST authenticity: baseline TTL per direction, taken from the first
+	// packet seen from that side (before any RST), and the TTL/IP-ID of the
+	// RST itself so it can be compared against its own direction's baseline.
+	fwdBaselineTTL, revBaselineTTL       uint8
+	fwdBaselineTTLSet, revBaselineTTLSet bool
+	rstSeen                              bool
+	rstFromReversed                      bool
+	rstTTL                               uint8
+	rstIPID                              uint16
 }
 
 // HandlePacket updates flow state. Called for every packet in the pipeline.
 func (t *Tracker) HandlePacket(pkt *domain.Packet) {
 	if pkt.SrcIP == "" || pkt.DstIP == "" {
+		return
+	}
+	// Synthetic packets built from TCP-reassembled application messages (see
+	// pipeline.NewDecodeWorkerWithAssembler) carry no real TCPSeq/TCPFlags —
+	// those fields are left at their zero value. The real segments that make
+	// up the reassembled message already passed through here individually,
+	// so processing the synthetic copy on top would double-count bytes/packets
+	// and — since its seq is always 0, "before" any real sequence number
+	// already seen — misclassify every reassembled message as a retransmission.
+	if pkt.Reassembled {
 		return
 	}
 
@@ -182,6 +224,27 @@ func (t *Tracker) HandlePacket(pkt *domain.Packet) {
 	}
 	if isRST {
 		rec.closedRST = true
+		if !rec.rstSeen {
+			// Only the first RST of the flow is used for authenticity
+			// comparison — later ones are typically retransmissions of it.
+			rec.rstSeen = true
+			rec.rstFromReversed = reversed
+			rec.rstTTL = pkt.TTL
+			rec.rstIPID = pkt.IPID
+		}
+	} else if pkt.TTL > 0 {
+		// Baseline TTL per direction, from the first non-RST packet seen on
+		// that side — establishes the "normal" hop-distance for that
+		// direction's real network path, for later comparison against the
+		// RST. Deliberately excludes RST packets themselves: an off-path
+		// injected RST that happens to be the very first packet captured
+		// from its direction must never become its own baseline (which
+		// would always compare equal to itself and hide the injection).
+		if !reversed && !rec.fwdBaselineTTLSet {
+			rec.fwdBaselineTTL, rec.fwdBaselineTTLSet = pkt.TTL, true
+		} else if reversed && !rec.revBaselineTTLSet {
+			rec.revBaselineTTL, rec.revBaselineTTLSet = pkt.TTL, true
+		}
 	}
 
 	seq := pkt.TCPSeq
@@ -265,10 +328,13 @@ func (rec *flowRecord) toFlow() domain.Flow {
 		revThroughputBps = float64(rec.revBytes*8) / durationSec
 	}
 
-	// Packet loss
+	// Packet loss. totalPkts already includes every retransmitted packet (they're
+	// counted unconditionally before the retransmission check runs), so the rate
+	// is simply retransmissions over total packets — not totalPkts+totalRetrans,
+	// which would double-count retransmissions in the denominator.
 	var lossRatePct float64
 	if totalPkts > 0 {
-		lossRatePct = float64(totalRetrans) / float64(totalPkts+totalRetrans) * 100
+		lossRatePct = float64(totalRetrans) / float64(totalPkts) * 100
 	}
 
 	// Average data RTT
@@ -355,6 +421,10 @@ func (rec *flowRecord) toFlow() domain.Flow {
 		}
 		m["close_reason"] = closeReason
 
+		if rec.rstSeen {
+			addRSTAuthenticityMetrics(m, rec)
+		}
+
 		if rec.hasRTT {
 			m["handshake_rtt_ms"] = round2(rec.rttMs)
 		}
@@ -384,6 +454,10 @@ func (rec *flowRecord) toFlow() domain.Flow {
 		flowType = domain.FlowUDP
 	case "SCTP":
 		flowType = domain.FlowSCTP
+	case "ICMP":
+		flowType = domain.FlowICMP
+	case "ICMPv6":
+		flowType = domain.FlowICMPv6
 	}
 
 	return domain.Flow{
@@ -425,6 +499,55 @@ func drainPending(pending []pendingSeg, ack uint32, now time.Time, samples *[]rt
 
 func round2(v float64) float64 {
 	return math.Round(v*100) / 100
+}
+
+// addRSTAuthenticityMetrics compares the flow-closing RST's TTL against the
+// baseline TTL established by earlier, non-RST packets from the same
+// direction. A large, sustained TTL gap means the RST almost certainly didn't
+// travel the same network path as the rest of the flow — i.e. it wasn't sent
+// by the real peer, but injected by something on (or off) the path: a
+// firewall/IPS reset, a transparent proxy tearing down the connection, or
+// (in the security-research sense of the term) censorship middleboxes. An
+// IP-ID of exactly 0 is added only as a weak corroborating note, since some
+// genuine stacks (notably modern Linux with per-socket randomized IDs) can
+// legitimately emit low or zero IDs — it never flips the verdict by itself.
+func addRSTAuthenticityMetrics(m map[string]any, rec *flowRecord) {
+	if rec.rstTTL == 0 {
+		return // no TTL captured for the RST (e.g. IPv6 hop limit of 0 is invalid anyway) — nothing to compare
+	}
+
+	var baseline uint8
+	var baselineSet bool
+	if rec.rstFromReversed {
+		baseline, baselineSet = rec.revBaselineTTL, rec.revBaselineTTLSet
+	} else {
+		baseline, baselineSet = rec.fwdBaselineTTL, rec.fwdBaselineTTLSet
+	}
+	if !baselineSet {
+		m["rst_authenticity"] = "unknown"
+		return
+	}
+
+	delta := int(baseline) - int(rec.rstTTL)
+	if delta < 0 {
+		delta = -delta
+	}
+
+	m["rst_ttl"] = rec.rstTTL
+	m["rst_ttl_baseline"] = baseline
+	m["rst_ttl_delta"] = delta
+
+	if delta >= rstTTLSuspiciousDelta {
+		reason := fmt.Sprintf("RST TTL %d differs from this flow's established baseline TTL %d by %d hops — exceeds normal route-noise threshold (%d), suggesting the RST did not travel the same network path as the rest of the flow",
+			rec.rstTTL, baseline, delta, rstTTLSuspiciousDelta)
+		if rec.rstIPID == 0 {
+			reason += "; RST IP-ID is 0, a weak additional signal consistent with a crude packet-injection tool"
+		}
+		m["rst_authenticity"] = "suspicious"
+		m["rst_authenticity_reason"] = reason
+	} else {
+		m["rst_authenticity"] = "genuine"
+	}
 }
 
 func tcpFlagsString(flags uint16) string {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	"DeepPacketAI/internal/domain"
 	"DeepPacketAI/internal/protocols"
@@ -16,6 +17,7 @@ type Decoder struct {
 }
 
 type pfcpRecord struct {
+	Timestamp  time.Time
 	Header     PFCPHeader
 	MsgName    string
 	CauseCode  uint8
@@ -129,12 +131,14 @@ func (d *Decoder) Flush() []domain.Flow {
 
 	for _, rec := range d.messages {
 		flows = append(flows, domain.Flow{
-			FlowID:  fmt.Sprintf("pfcp-%d-%d", rec.Header.SEID, rec.Header.SequenceNo),
-			Type:    domain.FlowPFCP,
-			SrcIP:   rec.SrcIP,
-			DstIP:   rec.DstIP,
-			SrcPort: rec.SrcPort,
-			DstPort: rec.DstPort,
+			FlowID:    fmt.Sprintf("pfcp-%d-%d", rec.Header.SEID, rec.Header.SequenceNo),
+			Type:      domain.FlowPFCP,
+			SrcIP:     rec.SrcIP,
+			DstIP:     rec.DstIP,
+			SrcPort:   rec.SrcPort,
+			DstPort:   rec.DstPort,
+			StartTime: rec.Timestamp,
+			EndTime:   rec.Timestamp,
 			Metrics: map[string]any{
 				"message_type": rec.MsgName,
 				"seid":         rec.Header.SEID,
@@ -199,12 +203,13 @@ func (d *Decoder) parsePFCP(pkt *domain.Packet) *pfcpRecord {
 	}
 
 	rec := &pfcpRecord{
-		Header:  hdr,
-		MsgName: msgName,
-		SrcIP:   pkt.SrcIP,
-		DstIP:   pkt.DstIP,
-		SrcPort: pkt.SrcPort,
-		DstPort: pkt.DstPort,
+		Timestamp: pkt.Timestamp,
+		Header:    hdr,
+		MsgName:   msgName,
+		SrcIP:     pkt.SrcIP,
+		DstIP:     pkt.DstIP,
+		SrcPort:   pkt.SrcPort,
+		DstPort:   pkt.DstPort,
 	}
 
 	// Parse all IEs from the message body

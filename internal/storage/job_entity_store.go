@@ -1,8 +1,6 @@
 package storage
 
 import (
-	"time"
-
 	"DeepPacketAI/internal/web/api"
 )
 
@@ -71,8 +69,8 @@ func (s *SQLiteStore) ListEntitiesForJob(
 			return nil, err
 		}
 
-		startTime, _ := time.Parse(time.RFC3339, startStr)
-    endTime, _ := time.Parse(time.RFC3339, endStr)
+		startTime := parseSQLiteTime(startStr)
+		endTime := parseSQLiteTime(endStr)
 
 
 		entities = append(entities, api.EntityItem{

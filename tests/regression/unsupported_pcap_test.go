@@ -14,7 +14,13 @@ import (
 )
 
 // TestUnsupportedPCAP_ICMP verifies that a PCAP containing only ICMP packets
-// (no TCP/UDP/SCTP) is rejected with a clear "no supported traffic" error.
+// (no TCP/UDP/SCTP) is fully analysed, not rejected: reader.go decodes ICMP
+// packets (Type/Code mapped onto SrcPort/DstPort), and flowengine merges an
+// echo request with its own reply into a single flow per host pair — needed
+// for icmpFloodRule to do meaningful ICMP flood/ping-sweep detection. This
+// used to be a "no supported traffic" rejection case before ICMP decoding was
+// added; the behavior is now deliberately the opposite (see the pcapCount
+// guard and comment in executor.go's runPCAP).
 func TestUnsupportedPCAP_ICMP(t *testing.T) {
 	t0 := time.Date(2024, 1, 1, 10, 0, 0, 0, time.UTC)
 
@@ -32,18 +38,18 @@ func TestUnsupportedPCAP_ICMP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pipeline returned unexpected error: %v", err)
 	}
-	if len(packets) != 0 {
-		t.Errorf("expected 0 packets, got %d", len(packets))
+	if len(packets) != 3 {
+		t.Errorf("expected 3 ICMP packets to be extracted, got %d", len(packets))
 	}
-	if len(flows) != 0 {
-		t.Errorf("expected 0 flows, got %d", len(flows))
+	// All 3 frames use the same Type/Code (echo request) between the same
+	// host pair, just with the two IPs swapped for the third — merges into
+	// one flow per host pair regardless of which side is "src" in a given
+	// packet (see flowengine.makeKey's ICMP special case).
+	if len(flows) != 1 {
+		t.Errorf("expected 1 merged ICMP flow, got %d", len(flows))
 	}
-
-	// Simulate what executor does: check for empty packets
-	if len(packets) == 0 {
-		wantMsg := "no supported traffic found"
-		_ = wantMsg // executor.runPCAP would call FailJob with this message
-		t.Logf("correctly detected unsupported PCAP: 0 packets extracted from ICMP-only capture")
+	if len(flows) == 1 && flows[0].Type != "ICMP" {
+		t.Errorf("expected flow type ICMP, got %q", flows[0].Type)
 	}
 }
 

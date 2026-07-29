@@ -23,6 +23,10 @@ const (
 	FlowSBI       FlowType = "SBI"   // 3GPP Service Based Interface
 	FlowNAS5G     FlowType = "NAS5G" // 5G NAS
 	FlowGTPU      FlowType = "GTPU"  // GTP-U with inner packet info
+	FlowAJP       FlowType = "AJP"   // Apache JServ Protocol (mod_jk/mod_proxy_ajp <-> servlet container)
+	FlowSNMP      FlowType = "SNMP"  // Simple Network Management Protocol (v1/v2c)
+	FlowICMP      FlowType = "ICMP"
+	FlowICMPv6    FlowType = "ICMPv6"
 )
 
 type Flow struct {

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strings"
+	"time"
 
 	"DeepPacketAI/internal/domain"
 	"DeepPacketAI/internal/protocols"
@@ -84,6 +85,7 @@ type http2Record struct {
 	SrcPort      uint16
 	DstPort      uint16
 	FrameNum     uint64
+	Timestamp    time.Time
 	Streams      map[uint32]*http2Stream
 	StreamCount  int
 	ErrorCount   int
@@ -183,12 +185,14 @@ func (d *Decoder) Flush() []domain.Flow {
 		}
 
 		flows = append(flows, domain.Flow{
-			FlowID:  fmt.Sprintf("http2-%s-%d-%d", rec.SrcIP, rec.SrcPort, rec.FrameNum),
-			Type:    flowType,
-			SrcIP:   rec.SrcIP,
-			DstIP:   rec.DstIP,
-			SrcPort: rec.SrcPort,
-			DstPort: rec.DstPort,
+			FlowID:    fmt.Sprintf("http2-%s-%d-%d", rec.SrcIP, rec.SrcPort, rec.FrameNum),
+			Type:      flowType,
+			SrcIP:     rec.SrcIP,
+			DstIP:     rec.DstIP,
+			SrcPort:   rec.SrcPort,
+			DstPort:   rec.DstPort,
+			StartTime: rec.Timestamp,
+			EndTime:   rec.Timestamp,
 			Metrics: map[string]any{
 				"method":       rec.Method,
 				"path":         rec.Path,
@@ -217,12 +221,13 @@ func (d *Decoder) parseHTTP2(pkt *domain.Packet) *http2Record {
 	}
 
 	rec := &http2Record{
-		SrcIP:    pkt.SrcIP,
-		DstIP:    pkt.DstIP,
-		SrcPort:  pkt.SrcPort,
-		DstPort:  pkt.DstPort,
-		FrameNum: pkt.FrameNumber,
-		Streams:  make(map[uint32]*http2Stream),
+		SrcIP:     pkt.SrcIP,
+		DstIP:     pkt.DstIP,
+		SrcPort:   pkt.SrcPort,
+		DstPort:   pkt.DstPort,
+		FrameNum:  pkt.FrameNumber,
+		Timestamp: pkt.Timestamp,
+		Streams:   make(map[uint32]*http2Stream),
 	}
 
 	// Parse HTTP/2 frames

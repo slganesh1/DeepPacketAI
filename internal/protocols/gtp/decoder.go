@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"time"
 
 	"DeepPacketAI/internal/domain"
 	"DeepPacketAI/internal/dpi"
@@ -196,14 +197,18 @@ func (d *Decoder) Flush() []domain.Flow {
 			metrics["inner_packet_count"] = tx.InnerPacketCount
 		}
 
+		ts, _ := tx.Timestamp.(time.Time)
+
 		flows = append(flows, domain.Flow{
-			FlowID:  tx.ID,
-			Type:    flowType,
-			SrcIP:   tx.SrcIP,
-			DstIP:   tx.DstIP,
-			SrcPort: tx.SrcPort,
-			DstPort: tx.DstPort,
-			Metrics: metrics,
+			FlowID:    tx.ID,
+			Type:      flowType,
+			SrcIP:     tx.SrcIP,
+			DstIP:     tx.DstIP,
+			SrcPort:   tx.SrcPort,
+			DstPort:   tx.DstPort,
+			StartTime: ts,
+			EndTime:   ts,
+			Metrics:   metrics,
 		})
 	}
 

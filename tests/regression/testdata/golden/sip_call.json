@@ -1,22 +1,15 @@
 {
-  "flow_count": 12,
+  "flow_count": 5,
   "flow_types": [
-    "DNS",
-    "GTP",
     "RTP",
     "SIP",
     "UDP"
   ],
-  "alert_count": 29,
+  "alert_count": 7,
   "alert_titles": [
-    "DNS TIMEOUT: ",
     "High Jitter (593.5ms)",
     "Protocol Mismatch (port 5060)",
     "QoS Degradation (est. MOS 1.3)",
-    "Traffic Concentration: 10.0.0.1 (source)",
-    "Traffic Concentration: 10.0.0.2 (destination)",
-    "Unusual DNS Port (49154 -\u003e 49152)",
-    "Unusual GTP Port (5060 -\u003e 5060)",
     "Unusual SIP Port (0 -\u003e 0)"
   ],
   "call_count": 0

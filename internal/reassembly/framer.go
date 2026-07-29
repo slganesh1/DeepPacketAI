@@ -29,6 +29,9 @@ func SelectFramer(srcPort, dstPort uint16) MessageFramer {
 	if srcPort == 3868 || dstPort == 3868 {
 		return &DiameterFramer{}
 	}
+	if srcPort == 8009 || dstPort == 8009 {
+		return &AJPFramer{}
+	}
 	return nil
 }
 
@@ -220,6 +223,51 @@ func (f *DiameterFramer) Feed(data []byte) [][]byte {
 }
 
 func (f *DiameterFramer) Flush() []byte {
+	remaining := f.buf
+	f.buf = nil
+	return remaining
+}
+
+// --- AJP Framer ---
+
+// AJPFramer detects AJP13 message boundaries using its 4-byte header:
+// Magic(2B, 0x1234 or "AB") + DataLength(2B), followed by that many bytes.
+type AJPFramer struct {
+	buf []byte
+}
+
+func (f *AJPFramer) Feed(data []byte) [][]byte {
+	f.buf = append(f.buf, data...)
+	var msgs [][]byte
+
+	for {
+		if len(f.buf) < 4 {
+			break
+		}
+		magic := binary.BigEndian.Uint16(f.buf[0:2])
+		if magic != 0x1234 && magic != 0x4142 {
+			// Not a valid AJP header; skip one byte to resync.
+			f.buf = f.buf[1:]
+			continue
+		}
+
+		dataLen := int(binary.BigEndian.Uint16(f.buf[2:4]))
+		totalLen := 4 + dataLen
+
+		if len(f.buf) < totalLen {
+			break
+		}
+
+		msg := make([]byte, totalLen)
+		copy(msg, f.buf[:totalLen])
+		msgs = append(msgs, msg)
+		f.buf = f.buf[totalLen:]
+	}
+
+	return msgs
+}
+
+func (f *AJPFramer) Flush() []byte {
 	remaining := f.buf
 	f.buf = nil
 	return remaining

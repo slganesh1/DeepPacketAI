@@ -7,6 +7,34 @@ import (
 	"DeepPacketAI/internal/domain"
 )
 
+// sqliteTimeLayouts are the formats a start_time/end_time column may contain.
+// mattn/go-sqlite3 writes time.Time values using its own default layout
+// ("2006-01-02 15:04:05.999999999-07:00" — space-separated, not RFC3339's
+// "T"), so a plain time.Parse(time.RFC3339, ...) fails silently on every
+// value that driver wrote and falls back to the zero time. Try the actual
+// driver format first, then RFC3339 for forward/other-source compatibility.
+var sqliteTimeLayouts = []string{
+	"2006-01-02 15:04:05.999999999-07:00",
+	time.RFC3339,
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02T15:04:05.999999999",
+}
+
+// parseSQLiteTime parses a start_time/end_time string stored by any of the
+// layouts above, returning the zero time only if the string itself is empty
+// or truly unparseable in every known format.
+func parseSQLiteTime(s string) time.Time {
+	if s == "" {
+		return time.Time{}
+	}
+	for _, layout := range sqliteTimeLayouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
 // GetAllFlows retrieves all flows from the database.
 func (s *SQLiteStore) GetAllFlows() ([]domain.Flow, error) {
 	ctx, cancel := queryCtx()
@@ -36,8 +64,8 @@ func (s *SQLiteStore) GetAllFlows() ([]domain.Flow, error) {
 		f.Type = domain.FlowType(flowType)
 		f.SrcPort = uint16(srcPort)
 		f.DstPort = uint16(dstPort)
-		f.StartTime, _ = time.Parse(time.RFC3339, startTime)
-		f.EndTime, _ = time.Parse(time.RFC3339, endTime)
+		f.StartTime = parseSQLiteTime(startTime)
+		f.EndTime = parseSQLiteTime(endTime)
 
 		if metricsJSON != nil && *metricsJSON != "" {
 			var m map[string]any
@@ -82,8 +110,8 @@ func (s *SQLiteStore) GetFlowsByJob(jobID int64) ([]domain.Flow, error) {
 		f.Type = domain.FlowType(flowType)
 		f.SrcPort = uint16(srcPort)
 		f.DstPort = uint16(dstPort)
-		f.StartTime, _ = time.Parse(time.RFC3339, startTime)
-		f.EndTime, _ = time.Parse(time.RFC3339, endTime)
+		f.StartTime = parseSQLiteTime(startTime)
+		f.EndTime = parseSQLiteTime(endTime)
 
 		if metricsJSON != nil && *metricsJSON != "" {
 			var m map[string]any
@@ -130,8 +158,8 @@ func (s *SQLiteStore) GetCallsByJob(jobID int64) ([]domain.Call, error) {
 			continue
 		}
 
-		c.StartTime, _ = time.Parse(time.RFC3339, startTime)
-		c.EndTime, _ = time.Parse(time.RFC3339, endTime)
+		c.StartTime = parseSQLiteTime(startTime)
+		c.EndTime = parseSQLiteTime(endTime)
 		c.IsOnHold = isOnHold
 
 		if fromURI != nil || toURI != nil {
@@ -181,8 +209,8 @@ func (s *SQLiteStore) GetAllCalls() ([]domain.Call, error) {
 			continue
 		}
 
-		c.StartTime, _ = time.Parse(time.RFC3339, startTime)
-		c.EndTime, _ = time.Parse(time.RFC3339, endTime)
+		c.StartTime = parseSQLiteTime(startTime)
+		c.EndTime = parseSQLiteTime(endTime)
 		c.IsOnHold = isOnHold
 
 		if fromURI != nil || toURI != nil {

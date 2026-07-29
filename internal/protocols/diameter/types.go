@@ -1,5 +1,7 @@
 package diameter
 
+import "time"
+
 // DiameterHeader represents a parsed Diameter message header (20 bytes).
 type DiameterHeader struct {
 	Version    uint8
@@ -14,6 +16,7 @@ type DiameterHeader struct {
 
 // DiameterMessage contains a parsed header and key extracted fields.
 type DiameterMessage struct {
+	Timestamp       time.Time
 	Header          DiameterHeader
 	SessionID       string
 	ResultCode      uint32

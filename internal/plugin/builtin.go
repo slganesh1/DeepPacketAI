@@ -7,6 +7,7 @@ import (
 	"DeepPacketAI/internal/detection"
 	"DeepPacketAI/internal/flowengine"
 	"DeepPacketAI/internal/protocols"
+	"DeepPacketAI/internal/protocols/ajp"
 	"DeepPacketAI/internal/protocols/diameter"
 	"DeepPacketAI/internal/protocols/dns"
 	"DeepPacketAI/internal/protocols/gtp"
@@ -18,6 +19,7 @@ import (
 	"DeepPacketAI/internal/protocols/rtp"
 	"DeepPacketAI/internal/protocols/s1ap"
 	"DeepPacketAI/internal/protocols/sip"
+	"DeepPacketAI/internal/protocols/snmp"
 	"DeepPacketAI/internal/protocols/tls"
 	"DeepPacketAI/internal/protocols/websocket"
 )
@@ -267,6 +269,40 @@ func registerProtocolPlugins() {
 		Enabled: true,
 		NewDecoder: func() protocols.Decoder {
 			return flowengine.NewTracker()
+		},
+	})
+
+	RegisterProtocol(&ProtocolPlugin{
+		Manifest: Manifest{
+			Name:        "ajp",
+			Version:     "1.0.0",
+			Author:      "builtin",
+			Description: "AJP13 (Apache JServ Protocol) decoder — method/URI/headers and SOAPAction for Apache-to-servlet-container traffic",
+			Category:    CategoryProtocol,
+			Tags:        []string{"ajp", "http", "soap", "tomcat"},
+			Protocols:   []string{"AJP"},
+			Ports:       []int{8009},
+		},
+		Enabled: true,
+		NewDecoder: func() protocols.Decoder {
+			return ajp.NewDecoder()
+		},
+	})
+
+	RegisterProtocol(&ProtocolPlugin{
+		Manifest: Manifest{
+			Name:        "snmp",
+			Version:     "1.0.0",
+			Author:      "builtin",
+			Description: "SNMP v1/v2c decoder — community string, PDU type, error status, and variable bindings",
+			Category:    CategoryProtocol,
+			Tags:        []string{"snmp", "network-management"},
+			Protocols:   []string{"SNMP"},
+			Ports:       []int{161, 162},
+		},
+		Enabled: true,
+		NewDecoder: func() protocols.Decoder {
+			return snmp.NewDecoder()
 		},
 	})
 }

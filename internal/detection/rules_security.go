@@ -10,6 +10,56 @@ import (
 	"github.com/google/uuid"
 )
 
+// suspiciousRSTRule flags TCP flows whose closing RST likely wasn't sent by
+// the real peer: flowengine.Tracker compares the RST packet's TTL against a
+// baseline TTL established from earlier, genuine packets on the same
+// direction (see internal/flowengine/tracker.go's addRSTAuthenticityMetrics),
+// and surfaces "rst_authenticity"="suspicious" when the gap is too large to
+// be ordinary route noise — the classic signature of a middlebox, IPS, or
+// firewall injecting a reset rather than the endpoint actually closing the
+// connection.
+func suspiciousRSTRule() Rule {
+	return Rule{
+		Name:     "Suspicious TCP RST (Possible Injected Reset)",
+		Protocol: "TCP",
+		Check: func(ctx *RuleContext) []Alert {
+			var alerts []Alert
+			for _, f := range ctx.Flows {
+				if f.Type != "TCP" {
+					continue
+				}
+				authenticity, _ := f.Metrics["rst_authenticity"].(string)
+				if authenticity != "suspicious" {
+					continue
+				}
+				reason, _ := f.Metrics["rst_authenticity_reason"].(string)
+				delta, _ := f.Metrics["rst_ttl_delta"].(int)
+
+				alerts = append(alerts, Alert{
+					ID:        uuid.New().String(),
+					Timestamp: time.Now(),
+					Severity:  SeverityWarning,
+					Protocol:  "TCP",
+					Title:     fmt.Sprintf("Suspicious RST: %s:%d -> %s:%d", f.SrcIP, f.SrcPort, f.DstIP, f.DstPort),
+					Description: fmt.Sprintf(
+						"TCP connection %s:%d -> %s:%d was closed by an RST whose TTL is inconsistent with this flow's established network path (%s) — possible middlebox/IPS/firewall-injected reset rather than a genuine peer close",
+						f.SrcIP, f.SrcPort, f.DstIP, f.DstPort, reason,
+					),
+					FlowID: f.FlowID,
+					Metadata: map[string]any{
+						"rst_ttl":          f.Metrics["rst_ttl"],
+						"rst_ttl_baseline": f.Metrics["rst_ttl_baseline"],
+						"rst_ttl_delta":    delta,
+						"reason":           reason,
+						"attack_type":      "injected_rst",
+					},
+				})
+			}
+			return alerts
+		},
+	}
+}
+
 // ─── Category 9: Advanced VoIP Security ─────────────────────────────────────
 
 // sipOptionsScanRule detects SIP OPTIONS scanning — probing to enumerate SIP endpoints.

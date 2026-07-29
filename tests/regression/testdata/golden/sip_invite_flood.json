@@ -1,17 +1,15 @@
 {
-  "flow_count": 51,
+  "flow_count": 26,
   "flow_types": [
-    "GTP",
     "SIP",
     "UDP"
   ],
-  "alert_count": 105,
+  "alert_count": 6,
   "alert_titles": [
     "Protocol Mismatch (port 5060)",
     "SIP INVITE Flood: 10.1.1.1 (25 INVITEs)",
     "Traffic Concentration: 10.0.0.2 (destination)",
     "Traffic Concentration: 10.1.1.1 (source)",
-    "Unusual GTP Port (5060 -\u003e 5060)",
     "Unusual SIP Port (0 -\u003e 0)"
   ],
   "call_count": 0

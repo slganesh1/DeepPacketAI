@@ -28,22 +28,24 @@ func (d *Decoder) HandlePacket(pkt *domain.Packet) {
 	if len(pkt.Payload) < 12 {
 		return
 	}
-	if !isDNSPort(pkt.SrcPort, pkt.DstPort) && !dpi.IsDNS(pkt.Payload) {
+	onDNSPort := isDNSPort(pkt.SrcPort, pkt.DstPort)
+	if !onDNSPort && !dpi.IsDNS(pkt.Payload) {
 		return
 	}
 
-	d.parseDNS(pkt)
+	d.parseDNS(pkt, onDNSPort)
 }
 
 func (d *Decoder) HandlePacketLive(pkt *domain.Packet) *protocols.DecodedPacket {
 	if len(pkt.Payload) < 12 {
 		return nil
 	}
-	if !isDNSPort(pkt.SrcPort, pkt.DstPort) && !dpi.IsDNS(pkt.Payload) {
+	onDNSPort := isDNSPort(pkt.SrcPort, pkt.DstPort)
+	if !onDNSPort && !dpi.IsDNS(pkt.Payload) {
 		return nil
 	}
 
-	tx := d.parseDNS(pkt)
+	tx := d.parseDNS(pkt, onDNSPort)
 	if tx == nil {
 		return nil
 	}
@@ -104,7 +106,7 @@ func (d *Decoder) Flush() []domain.Flow {
 	return flows
 }
 
-func (d *Decoder) parseDNS(pkt *domain.Packet) *Transaction {
+func (d *Decoder) parseDNS(pkt *domain.Packet, onDNSPort bool) *Transaction {
 	payload := pkt.Payload
 	txID := binary.BigEndian.Uint16(payload[0:2])
 	flags := binary.BigEndian.Uint16(payload[2:4])
@@ -114,6 +116,14 @@ func (d *Decoder) parseDNS(pkt *domain.Packet) *Transaction {
 	if !isResponse {
 		// Query
 		name, qtype := parseQuestion(payload)
+		if !onDNSPort && name == "" {
+			// Reached only via the non-standard-port heuristic sniff; a
+			// blank name means the payload isn't really DNS (e.g. a GTP-U
+			// tunnel payload or TLS record that happened to satisfy the
+			// header check). Drop it silently instead of creating a
+			// transaction that will later be flushed as a bogus timeout.
+			return nil
+		}
 		tx := &Transaction{
 			TxID:      txID,
 			QueryName: name,
@@ -135,6 +145,10 @@ func (d *Decoder) parseDNS(pkt *domain.Packet) *Transaction {
 	if !ok {
 		// Response without matching query
 		name, qtype := parseQuestion(payload)
+		if !onDNSPort && name == "" {
+			// Same non-DNS-payload guard as the query path above.
+			return nil
+		}
 		tx = &Transaction{
 			TxID:      txID,
 			QueryName: name,
@@ -297,10 +311,74 @@ func parseAnswers(payload []byte) []string {
 					binary.BigEndian.Uint16(payload[offset+12:offset+14]),
 					binary.BigEndian.Uint16(payload[offset+14:offset+16])))
 			}
+		case 2: // NS
+			name := decodeName(payload, offset)
+			if name != "" {
+				answers = append(answers, name)
+			}
 		case 5: // CNAME
 			name := decodeName(payload, offset)
 			if name != "" {
 				answers = append(answers, name)
+			}
+		case 6: // SOA — MNAME, RNAME, SERIAL, REFRESH, RETRY, EXPIRE, MINIMUM
+			mname := decodeName(payload, offset)
+			mnameLen := nameLength(payload, offset)
+			rnameOff := offset + mnameLen
+			rname := decodeName(payload, rnameOff)
+			rnameLen := nameLength(payload, rnameOff)
+			numOff := rnameOff + rnameLen
+			if numOff+20 <= len(payload) {
+				serial := binary.BigEndian.Uint32(payload[numOff : numOff+4])
+				refresh := binary.BigEndian.Uint32(payload[numOff+4 : numOff+8])
+				retry := binary.BigEndian.Uint32(payload[numOff+8 : numOff+12])
+				expire := binary.BigEndian.Uint32(payload[numOff+12 : numOff+16])
+				minimum := binary.BigEndian.Uint32(payload[numOff+16 : numOff+20])
+				answers = append(answers, fmt.Sprintf("%s %s %d %d %d %d %d",
+					mname, rname, serial, refresh, retry, expire, minimum))
+			}
+		case 15: // MX — PREFERENCE, EXCHANGE
+			if rdLength >= 3 {
+				pref := binary.BigEndian.Uint16(payload[offset : offset+2])
+				exchange := decodeName(payload, offset+2)
+				answers = append(answers, fmt.Sprintf("%d %s", pref, exchange))
+			}
+		case 16: // TXT — one or more length-prefixed character-strings
+			var strs []string
+			p := offset
+			end := offset + int(rdLength)
+			for p < end && p < len(payload) {
+				l := int(payload[p])
+				p++
+				if p+l > len(payload) || p+l > end {
+					break
+				}
+				strs = append(strs, string(payload[p:p+l]))
+				p += l
+			}
+			if len(strs) > 0 {
+				answers = append(answers, strings.Join(strs, " "))
+			}
+		case 33: // SRV — PRIORITY, WEIGHT, PORT, TARGET
+			if rdLength >= 7 {
+				priority := binary.BigEndian.Uint16(payload[offset : offset+2])
+				weight := binary.BigEndian.Uint16(payload[offset+2 : offset+4])
+				port := binary.BigEndian.Uint16(payload[offset+4 : offset+6])
+				target := decodeName(payload, offset+6)
+				answers = append(answers, fmt.Sprintf("%d %d %d %s", priority, weight, port, target))
+			}
+		case 35: // NAPTR — ORDER, PREFERENCE, FLAGS, SERVICE, REGEXP, REPLACEMENT
+			if rdLength >= 4 {
+				order := binary.BigEndian.Uint16(payload[offset : offset+2])
+				pref := binary.BigEndian.Uint16(payload[offset+2 : offset+4])
+				p := offset + 4
+				var flags, service, regexp string
+				flags, p = readCharString(payload, p)
+				service, p = readCharString(payload, p)
+				regexp, p = readCharString(payload, p)
+				replacement := decodeName(payload, p)
+				answers = append(answers, fmt.Sprintf("%d %d %q %q %q %s",
+					order, pref, flags, service, regexp, replacement))
 			}
 		}
 
@@ -308,6 +386,40 @@ func parseAnswers(payload []byte) []string {
 	}
 
 	return answers
+}
+
+// nameLength returns how many bytes a (possibly compressed) domain name
+// occupies starting at offset — i.e. where the next field in the same
+// record begins. A compression pointer always occupies exactly 2 bytes at
+// this location regardless of how long the name it points to actually is.
+func nameLength(payload []byte, offset int) int {
+	pos := offset
+	for pos < len(payload) {
+		length := int(payload[pos])
+		if length == 0 {
+			return pos + 1 - offset
+		}
+		if length >= 0xC0 {
+			return pos + 2 - offset
+		}
+		pos += 1 + length
+	}
+	return pos - offset
+}
+
+// readCharString reads one length-prefixed <character-string> (RFC 1035
+// §3.3), as used by TXT and the three text fields of NAPTR, returning the
+// decoded string and the offset immediately after it.
+func readCharString(payload []byte, offset int) (string, int) {
+	if offset >= len(payload) {
+		return "", offset
+	}
+	l := int(payload[offset])
+	offset++
+	if offset+l > len(payload) {
+		return "", offset
+	}
+	return string(payload[offset : offset+l]), offset + l
 }
 
 func decodeName(payload []byte, offset int) string {

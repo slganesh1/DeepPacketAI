@@ -3,6 +3,7 @@ package s1ap
 import (
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"DeepPacketAI/internal/domain"
 	"DeepPacketAI/internal/protocols"
@@ -53,6 +54,7 @@ type s1apRecord struct {
 	SrcPort       uint16
 	DstPort       uint16
 	FrameNum      uint64
+	Timestamp     time.Time
 }
 
 func NewDecoder() *Decoder {
@@ -107,12 +109,14 @@ func (d *Decoder) Flush() []domain.Flow {
 	var flows []domain.Flow
 	for _, rec := range d.messages {
 		flows = append(flows, domain.Flow{
-			FlowID:  fmt.Sprintf("s1ap-%s-%d-%d", rec.ProcedureName, rec.ProcedureCode, rec.FrameNum),
-			Type:    domain.FlowS1AP,
-			SrcIP:   rec.SrcIP,
-			DstIP:   rec.DstIP,
-			SrcPort: rec.SrcPort,
-			DstPort: rec.DstPort,
+			FlowID:    fmt.Sprintf("s1ap-%s-%d-%d", rec.ProcedureName, rec.ProcedureCode, rec.FrameNum),
+			Type:      domain.FlowS1AP,
+			SrcIP:     rec.SrcIP,
+			DstIP:     rec.DstIP,
+			SrcPort:   rec.SrcPort,
+			DstPort:   rec.DstPort,
+			StartTime: rec.Timestamp,
+			EndTime:   rec.Timestamp,
 			Metrics: map[string]any{
 				"pdu_type":       rec.PDUType,
 				"procedure_code": rec.ProcedureCode,
@@ -162,6 +166,7 @@ func (d *Decoder) parseS1AP(pkt *domain.Packet) *s1apRecord {
 		SrcPort:       pkt.SrcPort,
 		DstPort:       pkt.DstPort,
 		FrameNum:      pkt.FrameNumber,
+		Timestamp:     pkt.Timestamp,
 	}
 
 	pkt.AppProtocol = "S1AP"

@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// BuiltinRules returns the default set of detection rules (24 total).
+// BuiltinRules returns the default set of detection rules (25 total).
 func BuiltinRules() []Rule {
 	return []Rule{
 		// Existing protocol-specific rules (8)
@@ -72,6 +72,9 @@ func BuiltinRules() []Rule {
 		tlsWeakCipherRule(),
 		tlsJA3AlertRule(),
 		tlsSelfSignedCertRule(),
+
+		// Category 12: TCP Integrity (1)
+		suspiciousRSTRule(),
 	}
 }
 
@@ -544,12 +547,32 @@ var standardPorts = map[string][]uint16{
 	"PFCP":     {8805},
 }
 
+// unusualPortKey identifies one non-standard (protocol, 5-tuple) pairing for
+// deduplication in unusualPortRule.
+type unusualPortKey struct {
+	proto            string
+	srcIP, dstIP     string
+	srcPort, dstPort uint16
+}
+
 func unusualPortRule() Rule {
 	return Rule{
 		Name:     "Unusual Port",
 		Protocol: "ALL",
 		Check: func(ctx *RuleContext) []Alert {
-			var alerts []Alert
+			// Some protocols (GTP, PFCP, ...) are tracked as one domain.Flow
+			// per message/transaction rather than one per tunnel — message
+			// correlation needs its own per-message keying, so a single
+			// non-standard port pair held for a tunnel's entire lifetime
+			// would otherwise raise one alert per message: for a long-lived
+			// tunneled conversation that's hundreds or thousands of
+			// functionally identical alerts. Deduplicate to one alert per
+			// unique (protocol, 5-tuple) combination, folding repeats into an
+			// occurrence count instead.
+			var order []unusualPortKey
+			byKey := make(map[unusualPortKey]*Alert)
+			counts := make(map[unusualPortKey]int)
+
 			for _, f := range ctx.Flows {
 				ports, ok := standardPorts[f.Type]
 				if !ok {
@@ -565,17 +588,37 @@ func unusualPortRule() Rule {
 						dstMatch = true
 					}
 				}
-				if !srcMatch && !dstMatch {
-					alerts = append(alerts, Alert{
-						ID:          uuid.New().String(),
-						Timestamp:   time.Now(),
-						Severity:    SeverityWarning,
-						Protocol:    f.Type,
-						Title:       fmt.Sprintf("Unusual %s Port (%d -> %d)", f.Type, f.SrcPort, f.DstPort),
-						Description: fmt.Sprintf("%s flow %s uses non-standard ports %d -> %d (expected %v)", f.Type, f.FlowID, f.SrcPort, f.DstPort, ports),
-						FlowID:      f.FlowID,
-					})
+				if srcMatch || dstMatch {
+					continue
 				}
+
+				key := unusualPortKey{f.Type, f.SrcIP, f.DstIP, f.SrcPort, f.DstPort}
+				counts[key]++
+				if _, exists := byKey[key]; exists {
+					continue
+				}
+				byKey[key] = &Alert{
+					ID:        uuid.New().String(),
+					Timestamp: time.Now(),
+					Severity:  SeverityWarning,
+					Protocol:  f.Type,
+					Title:     fmt.Sprintf("Unusual %s Port (%d -> %d)", f.Type, f.SrcPort, f.DstPort),
+					Description: fmt.Sprintf("%s traffic %s:%d -> %s:%d uses non-standard ports (expected %v)",
+						f.Type, f.SrcIP, f.SrcPort, f.DstIP, f.DstPort, ports),
+					FlowID: f.FlowID,
+				}
+				order = append(order, key)
+			}
+
+			alerts := make([]Alert, 0, len(order))
+			for _, key := range order {
+				a := *byKey[key]
+				count := counts[key]
+				if count > 1 {
+					a.Description = fmt.Sprintf("%s — seen across %d messages/flows in this capture", a.Description, count)
+				}
+				a.Metadata = map[string]any{"occurrence_count": count}
+				alerts = append(alerts, a)
 			}
 			return alerts
 		},

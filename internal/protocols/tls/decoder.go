@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"strings"
+	"time"
 
 	"DeepPacketAI/internal/domain"
 	"DeepPacketAI/internal/dpi"
@@ -48,7 +49,7 @@ var CipherSuiteNames = map[uint16]string{
 	0x1302: "TLS_AES_256_GCM_SHA384",
 	0x1303: "TLS_CHACHA20_POLY1305_SHA256",
 
-	// TLS 1.2 ECDHE
+	// TLS 1.2 ECDHE (AEAD)
 	0xC02B: "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
 	0xC02C: "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
 	0xC02F: "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
@@ -56,9 +57,25 @@ var CipherSuiteNames = map[uint16]string{
 	0xCCA8: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
 	0xCCA9: "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
 
-	// TLS 1.2 DHE
+	// TLS 1.2 ECDHE (CBC) — still forward-secret, common with older stacks
+	0xC009: "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA",
+	0xC00A: "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA",
+	0xC013: "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA",
+	0xC014: "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA",
+	0xC023: "TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256",
+	0xC024: "TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384",
+	0xC027: "TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256",
+	0xC028: "TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384",
+
+	// TLS 1.2 DHE (AEAD)
 	0x009E: "TLS_DHE_RSA_WITH_AES_128_GCM_SHA256",
 	0x009F: "TLS_DHE_RSA_WITH_AES_256_GCM_SHA384",
+
+	// TLS 1.2 DHE (CBC) — still forward-secret
+	0x0033: "TLS_DHE_RSA_WITH_AES_128_CBC_SHA",
+	0x0039: "TLS_DHE_RSA_WITH_AES_256_CBC_SHA",
+	0x0067: "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256",
+	0x006B: "TLS_DHE_RSA_WITH_AES_256_CBC_SHA256",
 
 	// TLS 1.2 RSA
 	0x009C: "TLS_RSA_WITH_AES_128_GCM_SHA256",
@@ -72,6 +89,18 @@ var CipherSuiteNames = map[uint16]string{
 // Decoder extracts TLS handshake metadata without decryption.
 type Decoder struct {
 	records []tlsRecord
+
+	// ccsSeen tracks, per direction ("srcIP:srcPort-dstIP:dstPort"), whether
+	// that endpoint has sent its ChangeCipherSpec. TLS 1.2 encrypts every
+	// record from that point on, including the Finished message — which
+	// keeps ContentTypeHandshake (0x16) as its record-layer content type even
+	// though the bytes are now ciphertext. Without this, parseHandshake blindly
+	// reinterprets the encrypted Finished message as a plaintext handshake
+	// (its first ciphertext byte is read as a handshake type, e.g. 0x02 =
+	// ServerHello), producing bogus fields like a "negotiated cipher suite"
+	// that's really just two arbitrary ciphertext bytes — observed in real
+	// captures as cipher IDs with no IANA assignment (e.g. 0x87e8).
+	ccsSeen map[string]bool
 }
 
 type tlsRecord struct {
@@ -80,6 +109,7 @@ type tlsRecord struct {
 	SrcPort       uint16
 	DstPort       uint16
 	FrameNum      uint64
+	Timestamp     time.Time
 	HandshakeType string   // "ClientHello", "ServerHello", "Certificate", "AppData"
 	TLSVersion    string
 	SNI           string   // Server Name Indication (from ClientHello)
@@ -93,7 +123,13 @@ type tlsRecord struct {
 }
 
 func NewDecoder() *Decoder {
-	return &Decoder{}
+	return &Decoder{ccsSeen: make(map[string]bool)}
+}
+
+// dirKey identifies one direction of a connection (this sender only) — used
+// to track ChangeCipherSpec state, which applies independently to each side.
+func dirKey(pkt *domain.Packet) string {
+	return fmt.Sprintf("%s:%d-%s:%d", pkt.SrcIP, pkt.SrcPort, pkt.DstIP, pkt.DstPort)
 }
 
 func (d *Decoder) Name() string { return "tls" }
@@ -184,8 +220,17 @@ func (d *Decoder) Flush() []domain.Flow {
 		var cipherSuiteIDs []uint16
 		var extTypes []uint16
 		handshakeTypes := []string{}
+		var startTime, endTime time.Time
 
 		for _, r := range recs {
+			if !r.Timestamp.IsZero() {
+				if startTime.IsZero() || r.Timestamp.Before(startTime) {
+					startTime = r.Timestamp
+				}
+				if r.Timestamp.After(endTime) {
+					endTime = r.Timestamp
+				}
+			}
 			if r.SNI != "" {
 				sni = r.SNI
 			}
@@ -195,10 +240,13 @@ func (d *Decoder) Flush() []domain.Flow {
 			if r.CipherSuite != "" {
 				cipher = r.CipherSuite
 			}
-			if r.CertSubject != "" {
+			// A connection can carry more than one Certificate message (e.g.
+			// mutual TLS, where both the server and the client send one) —
+			// take subject and issuer from the same record together so a
+			// later message's subject is never paired with an earlier
+			// message's issuer.
+			if r.CertSubject != "" || r.CertIssuer != "" {
 				certSubject = r.CertSubject
-			}
-			if r.CertIssuer != "" {
 				certIssuer = r.CertIssuer
 			}
 			if len(r.ALPN) > 0 {
@@ -259,13 +307,15 @@ func (d *Decoder) Flush() []domain.Flow {
 		flowID := fmt.Sprintf("tls-%s:%d-%s:%d", k.srcIP, k.srcPort, k.dstIP, k.dstPort)
 
 		flows = append(flows, domain.Flow{
-			FlowID:  flowID,
-			Type:    domain.FlowTLS,
-			SrcIP:   k.srcIP,
-			DstIP:   k.dstIP,
-			SrcPort: k.srcPort,
-			DstPort: k.dstPort,
-			Metrics: metrics,
+			FlowID:    flowID,
+			Type:      domain.FlowTLS,
+			SrcIP:     k.srcIP,
+			DstIP:     k.dstIP,
+			SrcPort:   k.srcPort,
+			DstPort:   k.dstPort,
+			StartTime: startTime,
+			EndTime:   endTime,
+			Metrics:   metrics,
 		})
 	}
 
@@ -367,15 +417,26 @@ func (d *Decoder) parseTLS(pkt *domain.Packet) *tlsRecord {
 	}
 
 	rec := &tlsRecord{
-		SrcIP:    pkt.SrcIP,
-		DstIP:    pkt.DstIP,
-		SrcPort:  pkt.SrcPort,
-		DstPort:  pkt.DstPort,
-		FrameNum: pkt.FrameNumber,
+		SrcIP:     pkt.SrcIP,
+		DstIP:     pkt.DstIP,
+		SrcPort:   pkt.SrcPort,
+		DstPort:   pkt.DstPort,
+		FrameNum:  pkt.FrameNumber,
+		Timestamp: pkt.Timestamp,
 	}
 
 	switch contentType {
 	case ContentTypeHandshake:
+		if d.ccsSeen[dirKey(pkt)] {
+			// This sender already sent its ChangeCipherSpec: every record it
+			// sends from here on is encrypted, even though the record-layer
+			// content type still reads as Handshake (it's almost always the
+			// Finished message). Label it without attempting to parse the
+			// ciphertext as a plaintext handshake structure.
+			rec.HandshakeType = "Finished (encrypted)"
+			rec.TLSVersion = versionName
+			break
+		}
 		if 5+recordLen > len(payload) {
 			recordLen = len(payload) - 5
 		}
@@ -391,6 +452,7 @@ func (d *Decoder) parseTLS(pkt *domain.Packet) *tlsRecord {
 	case ContentTypeChangeCipherSpec:
 		rec.HandshakeType = "ChangeCipherSpec"
 		rec.TLSVersion = versionName
+		d.ccsSeen[dirKey(pkt)] = true
 
 	case ContentTypeAlert:
 		rec.HandshakeType = "Alert"
@@ -431,8 +493,11 @@ func (d *Decoder) parseHandshake(data []byte, rec *tlsRecord) {
 	hsType := data[0]
 	hsLen := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
 	hsData := data[4:]
-	if hsLen > len(hsData) {
-		hsData = data[4:]
+	if hsLen <= len(hsData) {
+		// Truncate to the declared message length so a Certificate (or other)
+		// handshake message doesn't pull in bytes belonging to the next
+		// handshake message packed into the same TLS record.
+		hsData = hsData[:hsLen]
 	}
 
 	switch hsType {
@@ -747,14 +812,12 @@ func extractCN(certData []byte, isSubject bool) string {
 				if valOffset+2 > len(certData) {
 					return ""
 				}
-				// ASN.1 string: tag(1B) + length(1B) + value
-				strLen := int(certData[valOffset+1])
-				valStart := valOffset + 2
+				strLen, valStart, ok := readASN1Length(certData, valOffset+1)
+				if !ok || strLen <= 0 || strLen > 256 {
+					return ""
+				}
 				if valStart+strLen > len(certData) {
 					strLen = len(certData) - valStart
-				}
-				if strLen <= 0 || strLen > 256 {
-					return ""
 				}
 				cn := string(certData[valStart : valStart+strLen])
 				// Validate it looks like a domain/name
@@ -766,6 +829,37 @@ func extractCN(certData []byte, isSubject bool) string {
 		}
 	}
 	return ""
+}
+
+// readASN1Length decodes a DER length field starting at lenOffset (the byte
+// immediately after the tag). It handles both short form (a single byte
+// 0x00-0x7F, the length itself) and long form (a byte 0x81/0x82/... whose
+// low 7 bits give the number of following big-endian length bytes) — CN and
+// especially Organization values frequently exceed 127 bytes, which the
+// short-form-only DER length previously misread as a bogus length, corrupting
+// or blanking the extracted subject/issuer.
+// Returns the decoded length, the offset of the first value byte, and false
+// if the field is truncated or uses an unsupported (>2-byte) long form.
+func readASN1Length(data []byte, lenOffset int) (length int, valueStart int, ok bool) {
+	if lenOffset >= len(data) {
+		return 0, 0, false
+	}
+	b := data[lenOffset]
+	if b&0x80 == 0 {
+		return int(b), lenOffset + 1, true
+	}
+	numLenBytes := int(b & 0x7F)
+	if numLenBytes == 0 || numLenBytes > 2 {
+		return 0, 0, false // indefinite form or larger than any real CN/O needs
+	}
+	if lenOffset+1+numLenBytes > len(data) {
+		return 0, 0, false
+	}
+	length = 0
+	for i := 0; i < numLenBytes; i++ {
+		length = length<<8 | int(data[lenOffset+1+i])
+	}
+	return length, lenOffset + 1 + numLenBytes, true
 }
 
 func isPrintableString(s string) bool {

@@ -5,6 +5,7 @@ package nas5g
 import (
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"DeepPacketAI/internal/domain"
 	"DeepPacketAI/internal/protocols"
@@ -183,6 +184,7 @@ type nasRecord struct {
 	SrcPort          uint16
 	DstPort          uint16
 	FrameNum         uint64
+	Timestamp        time.Time
 	Procedure        string
 	MessageType      string
 	RegistrationType string
@@ -274,12 +276,14 @@ func (d *Decoder) Flush() []domain.Flow {
 		authFails := d.authFailures[ueKey]
 
 		flows = append(flows, domain.Flow{
-			FlowID:  fmt.Sprintf("nas5g-%s-%d", rec.SrcIP, rec.FrameNum),
-			Type:    domain.FlowNAS5G,
-			SrcIP:   rec.SrcIP,
-			DstIP:   rec.DstIP,
-			SrcPort: rec.SrcPort,
-			DstPort: rec.DstPort,
+			FlowID:    fmt.Sprintf("nas5g-%s-%d", rec.SrcIP, rec.FrameNum),
+			Type:      domain.FlowNAS5G,
+			SrcIP:     rec.SrcIP,
+			DstIP:     rec.DstIP,
+			SrcPort:   rec.SrcPort,
+			DstPort:   rec.DstPort,
+			StartTime: rec.Timestamp,
+			EndTime:   rec.Timestamp,
 			Metrics: map[string]any{
 				"procedure":         rec.Procedure,
 				"message_type":      rec.MessageType,
@@ -417,6 +421,7 @@ func (d *Decoder) buildMMRecord(pkt *domain.Packet, secHdr, msgType uint8, data 
 		SrcPort:        pkt.SrcPort,
 		DstPort:        pkt.DstPort,
 		FrameNum:       pkt.FrameNumber,
+		Timestamp:      pkt.Timestamp,
 		Procedure:      procedure,
 		MessageType:    msgName,
 		SecurityHeader: secHdrName,
@@ -493,6 +498,7 @@ func (d *Decoder) buildSMRecord(pkt *domain.Packet, pduSessionID, msgType uint8,
 		SrcPort:      pkt.SrcPort,
 		DstPort:      pkt.DstPort,
 		FrameNum:     pkt.FrameNumber,
+		Timestamp:    pkt.Timestamp,
 		Procedure:    procedure,
 		MessageType:  msgName,
 		PDUSessionID: pduSessionID,

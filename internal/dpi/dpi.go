@@ -14,8 +14,14 @@ package dpi
 // or an HTTP/1.x response status line.
 //
 // Signatures:
-//   - Requests:  "GET ", "POST ", "PUT ", "DELETE ", "HEAD ", "OPTIONS ",
-//                "PATCH ", "CONNECT ", "TRACE "  followed by "HTTP/1." somewhere.
+//   - Requests:  the standard RFC 7231 methods ("GET ", "POST ", "PUT ",
+//                "DELETE ", "HEAD ", "OPTIONS ", "PATCH ", "CONNECT ",
+//                "TRACE ") plus Apache mod_cluster's management-protocol
+//                extension methods ("STATUS ", "CONFIG ", "ENABLE-APP ",
+//                "DISABLE-APP ", "STOP-APP ", "REMOVE-APP ", "INFO ",
+//                "DUMP ", "PING ") — seen in real captures as cluster
+//                heartbeat/balancer traffic on a non-standard port — each
+//                followed by "HTTP/1." somewhere in the request line.
 //   - Responses: "HTTP/1." at offset 0.
 func IsHTTP(p []byte) bool {
 	if len(p) < 14 {
@@ -26,27 +32,8 @@ func IsHTTP(p []byte) bool {
 		return true
 	}
 	// Request: must start with a known method and contain " HTTP/1."
-	var methodLen int
-	switch {
-	case hasPrefix(p, "GET "):
-		methodLen = 4
-	case hasPrefix(p, "PUT "):
-		methodLen = 4
-	case hasPrefix(p, "HEAD "):
-		methodLen = 5
-	case hasPrefix(p, "POST "):
-		methodLen = 5
-	case hasPrefix(p, "DELETE "):
-		methodLen = 7
-	case hasPrefix(p, "OPTIONS "):
-		methodLen = 8
-	case hasPrefix(p, "CONNECT "):
-		methodLen = 8
-	case hasPrefix(p, "PATCH "):
-		methodLen = 6
-	case hasPrefix(p, "TRACE "):
-		methodLen = 6
-	default:
+	methodLen := httpRequestMethodLen(p)
+	if methodLen == 0 {
 		return false
 	}
 	// Confirm HTTP version appears in the first request line (up to 4 KB)
@@ -55,6 +42,51 @@ func IsHTTP(p []byte) bool {
 		window = window[:4096]
 	}
 	return contains(window, " HTTP/1.")
+}
+
+// httpRequestMethodLen returns the byte length of the HTTP method + trailing
+// space if p starts with a recognized method, or 0 if it does not.
+func httpRequestMethodLen(p []byte) int {
+	switch {
+	case hasPrefix(p, "GET "):
+		return 4
+	case hasPrefix(p, "PUT "):
+		return 4
+	case hasPrefix(p, "HEAD "):
+		return 5
+	case hasPrefix(p, "POST "):
+		return 5
+	case hasPrefix(p, "DELETE "):
+		return 7
+	case hasPrefix(p, "OPTIONS "):
+		return 8
+	case hasPrefix(p, "CONNECT "):
+		return 8
+	case hasPrefix(p, "PATCH "):
+		return 6
+	case hasPrefix(p, "TRACE "):
+		return 6
+	case hasPrefix(p, "STATUS "):
+		return 7
+	case hasPrefix(p, "CONFIG "):
+		return 7
+	case hasPrefix(p, "ENABLE-APP "):
+		return 11
+	case hasPrefix(p, "DISABLE-APP "):
+		return 12
+	case hasPrefix(p, "STOP-APP "):
+		return 9
+	case hasPrefix(p, "REMOVE-APP "):
+		return 11
+	case hasPrefix(p, "INFO "):
+		return 5
+	case hasPrefix(p, "DUMP "):
+		return 5
+	case hasPrefix(p, "PING "):
+		return 5
+	default:
+		return 0
+	}
 }
 
 // IsTLS returns true if the payload matches a TLS/SSL record header.
@@ -128,6 +160,14 @@ var sipPrefixes = []string{
 //	bytes 10-11: ARCOUNT — additional count
 //
 // At least one of QDCOUNT or ANCOUNT must be non-zero.
+//
+// This is used as a fallback sniff for DNS-over-nonstandard-port traffic, so
+// it is also invoked against payloads that are not DNS at all (GTP-U tunnel
+// contents, TLS records, etc). The header-flags check alone matches a
+// non-trivial fraction of arbitrary binary data, so it is combined with
+// sanity limits on the record counts and a full parse of the question
+// section — real non-DNS payloads essentially never also produce a
+// well-formed, printable question name.
 func IsDNS(p []byte) bool {
 	if len(p) < 12 {
 		return false
@@ -144,7 +184,59 @@ func IsDNS(p []byte) bool {
 	// At least one question or answer
 	qdCount := uint16(p[4])<<8 | uint16(p[5])
 	anCount := uint16(p[6])<<8 | uint16(p[7])
-	return qdCount > 0 || anCount > 0
+	if qdCount == 0 && anCount == 0 {
+		return false
+	}
+	// Real DNS messages carry a handful of records at most; implausibly
+	// large counts are a strong signal this is non-DNS data that happened
+	// to satisfy the flag checks above.
+	nsCount := uint16(p[8])<<8 | uint16(p[9])
+	arCount := uint16(p[10])<<8 | uint16(p[11])
+	if qdCount > 16 || anCount > 64 || nsCount > 64 || arCount > 64 {
+		return false
+	}
+	if qdCount > 0 && !hasValidQuestionSection(p) {
+		return false
+	}
+	return true
+}
+
+// hasValidQuestionSection walks the question name starting at byte 12 and
+// confirms it is composed of printable label bytes, terminates with a
+// zero-length root label (or a compression pointer) within the packet
+// bounds, and leaves room for a trailing QTYPE/QCLASS.
+func hasValidQuestionSection(p []byte) bool {
+	offset := 12
+	labels := 0
+	for offset < len(p) {
+		length := int(p[offset])
+		if length == 0 {
+			offset++
+			break
+		}
+		if length >= 0xC0 {
+			// Compression pointer — unusual in a question but technically
+			// legal; accept and stop walking rather than following it.
+			offset += 2
+			break
+		}
+		offset++
+		if offset+length > len(p) {
+			return false
+		}
+		for _, b := range p[offset : offset+length] {
+			if !((b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+				(b >= '0' && b <= '9') || b == '-' || b == '_' || b == '.') {
+				return false
+			}
+		}
+		offset += length
+		labels++
+		if labels > 20 {
+			return false
+		}
+	}
+	return offset+4 <= len(p)
 }
 
 // IsDiameter returns true if the payload matches a Diameter base protocol
@@ -183,16 +275,48 @@ func IsDiameter(p []byte) bool {
 // GTPv2 (3GPP TS 29.274): byte 0 bits [7:5] = 0b010 (version=2)
 //
 // Both: minimum header is 8 bytes; message type in byte 1 must be non-zero.
+// IsGTP returns true if the payload matches a GTP-C/GTP-U header (GTPv1 per
+// TS 29.060, or GTPv2 per TS 29.274).
+//
+// The version + non-zero-message-type check alone is too weak: roughly 1 in
+// 8 arbitrary byte strings satisfy it (any byte whose bits [7:5] read 001 or
+// 010, with a non-zero second byte), so it false-positives readily on
+// unrelated binary payloads (observed in practice: SNMPv3 BER-encoded
+// packets, whose leading 0x30 0x81 byte pair passes both checks). Two more
+// corroborating checks are added: the reserved/spare bits must actually be
+// zero, and the Length field (bytes 2-3) — which declares the size of
+// everything after the mandatory 8-byte header — must be plausible given
+// how much payload was actually captured.
 func IsGTP(p []byte) bool {
 	if len(p) < 8 {
 		return false
 	}
-	version := (p[0] >> 5) & 0x07
+	flagsByte := p[0]
+	version := (flagsByte >> 5) & 0x07
 	if version != 1 && version != 2 {
 		return false
 	}
+	if version == 1 {
+		// GTPv1: bit 3 (0x08) is spare/reserved and must be 0.
+		if flagsByte&0x08 != 0 {
+			return false
+		}
+	} else {
+		// GTPv2: bits 2-0 (0x07) are spare and must be 0.
+		if flagsByte&0x07 != 0 {
+			return false
+		}
+	}
 	// Message type 0 is reserved — a valid GTP packet always has a type
 	if p[1] == 0 {
+		return false
+	}
+	// Length must not claim far more data than was actually captured. A
+	// small slack allows for link-layer padding; there is no equivalent
+	// lower-bound check since trailing capture padding is common and benign.
+	declaredLen := int(p[2])<<8 | int(p[3])
+	remaining := len(p) - 8
+	if declaredLen > remaining+20 {
 		return false
 	}
 	return true

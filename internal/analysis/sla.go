@@ -42,9 +42,22 @@ func ClassifyTCP(rttMs, retransPct float64) SLAResult {
 		}
 	}
 
-	// Retransmission penalty (max 30 points): 0%=0, 3%=30
+	// Retransmission penalty. Scales 0→30 points across 0-3% (unchanged from
+	// before), matching the "poor" text boundary below. Beyond 3% — already
+	// labeled "critical" in the details text — the penalty keeps climbing
+	// instead of capping at 30: real captures show retransmission rates well
+	// past 30% (e.g. after fixing the reassembled-packet double-counting bug
+	// that previously inflated these numbers), and a flat 30-point ceiling
+	// meant any such flow scored 70 ("acceptable") whenever RTT was
+	// unmeasured — a "critical"-by-its-own-text flow could never actually
+	// reach a poor/critical verdict from retransmission severity alone.
 	if retransPct > 0 {
-		retransPenalty := min(int(retransPct/3*30), 30)
+		var retransPenalty int
+		if retransPct <= 3 {
+			retransPenalty = int(retransPct / 3 * 30)
+		} else {
+			retransPenalty = min(30+int((retransPct-3)/3*20), 90)
+		}
 		score -= retransPenalty
 		switch {
 		case retransPct <= 0.1:

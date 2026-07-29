@@ -29,4 +29,6 @@ type Packet struct {
 	TCPAck      uint32 // TCP acknowledgment number
 	TCPFlags    uint16 // SYN=0x02, FIN=0x01, RST=0x04, PSH=0x08, ACK=0x10
 	Reassembled bool   // true if this packet was synthesized from reassembled TCP data
+	TTL         uint8  // IPv4 TTL / IPv6 Hop Limit
+	IPID        uint16 // IPv4 Identification field (0 for IPv6, which has no base-header ID)
 }

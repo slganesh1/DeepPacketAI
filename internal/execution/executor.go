@@ -17,6 +17,7 @@ import (
 	"DeepPacketAI/internal/metrics"
 	"DeepPacketAI/internal/plugin"
 	"DeepPacketAI/internal/protocols"
+	"DeepPacketAI/internal/protocols/ajp"
 	"DeepPacketAI/internal/protocols/diameter"
 	"DeepPacketAI/internal/protocols/dns"
 	"DeepPacketAI/internal/protocols/gtp"
@@ -26,6 +27,7 @@ import (
 	"DeepPacketAI/internal/protocols/rtp"
 	"DeepPacketAI/internal/protocols/s1ap"
 	"DeepPacketAI/internal/protocols/sip"
+	"DeepPacketAI/internal/protocols/snmp"
 	"DeepPacketAI/internal/protocols/tls"
 	"DeepPacketAI/internal/protocols/websocket"
 	"DeepPacketAI/internal/storage"
@@ -102,6 +104,8 @@ func builtinDecoderFactory() []protocols.Decoder {
 		s1ap.NewDecoder(),
 		ngap.NewDecoder(),
 		websocket.NewDecoder(),
+		ajp.NewDecoder(),
+		snmp.NewDecoder(),
 		flowengine.NewTracker(),
 	}
 }

@@ -228,7 +228,7 @@ func (s *SQLiteStore) PurgeAllPackets() error {
 func (s *SQLiteStore) ClearJobData(jobID int64) error {
 	ctx, cancel := writeCtx()
 	defer cancel()
-	tables := []string{"flows", "calls", "rtp_legs", "events", "packets"}
+	tables := []string{"flows", "calls", "rtp_legs", "protocol_events", "packets"}
 	for _, t := range tables {
 		if _, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE job_id = ?", t), jobID); err != nil {
 			// Table might not exist yet — ignore

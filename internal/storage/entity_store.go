@@ -109,6 +109,5 @@ func (s *SQLiteStore) ListCallEntities(
 
 
 func mustParseTime(s string) time.Time {
-	t, _ := time.Parse(time.RFC3339Nano, s)
-	return t
+	return parseSQLiteTime(s)
 }

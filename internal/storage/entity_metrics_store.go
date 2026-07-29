@@ -1,8 +1,6 @@
 package storage
 
 import (
-	"time"
-
 	"DeepPacketAI/internal/web/api"
 )
 
@@ -38,7 +36,7 @@ func (s *SQLiteStore) GetMetricsForCall(callID string) (*api.EntityMetrics, erro
 			return nil, err
 		}
 
-		ts, _ := time.Parse(time.RFC3339, startStr)
+		ts := parseSQLiteTime(startStr)
 
 		jitter = append(jitter, api.MetricPoint{
 			Timestamp: ts,
@@ -63,7 +61,7 @@ func (s *SQLiteStore) GetMetricsForCall(callID string) (*api.EntityMetrics, erro
 	WHERE call_id = ?
 	`, callID).Scan(&endStr, &mos)
 
-	endTs, _ := time.Parse(time.RFC3339, endStr)
+	endTs := parseSQLiteTime(endStr)
 
 	metrics := map[string][]api.MetricPoint{}
 

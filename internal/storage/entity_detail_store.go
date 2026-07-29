@@ -3,7 +3,6 @@ package storage
 import (
 	"encoding/json"
 	"errors"
-	"time"
 
 	"DeepPacketAI/internal/domain"
 	"DeepPacketAI/internal/web/api"
@@ -176,8 +175,8 @@ func (s *SQLiteStore) GetEntityByCallID(callID string) (*api.EntityItem, error) 
 		return nil, err
 	}
 
-	startTime, _ := time.Parse(time.RFC3339, startStr)
-	endTime, _ := time.Parse(time.RFC3339, endStr)
+	startTime := parseSQLiteTime(startStr)
+	endTime := parseSQLiteTime(endStr)
 
 	entity := api.EntityItem{
 		EntityID:   "call:" + id,
